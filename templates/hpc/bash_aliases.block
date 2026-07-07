@@ -1,0 +1,37 @@
+# Queue helper
+alias q="squeue -u $USER"
+
+# Common ls aliases
+alias ll="ls -lhrt"
+alias la='ls -Al'
+alias lx='ls -lXB'
+alias lk='ls -lSr'
+alias lc='ls -ltcr'
+alias lu='ls -ltur'
+alias lt='ls -ltr'
+alias lm='ls -al | less'
+alias lr='ls -lR | less'
+alias tree='tree -Csu | less'
+
+# VS Code Slurm launcher
+# Usage:
+#   vscode        -> submits ~/vscode.sh
+#   vscode big    -> submits ~/vscode_big.sh
+#   vscode gpu    -> submits ~/vscode_gpu.sh
+vscode() {
+  case "${1:-}" in
+    "")
+      sbatch "$HOME/vscode.sh"
+      ;;
+    big)
+      sbatch "$HOME/vscode_big.sh"
+      ;;
+    gpu)
+      sbatch "$HOME/vscode_gpu.sh"
+      ;;
+    *)
+      echo "Usage: vscode [big|gpu]"
+      return 1
+      ;;
+  esac
+}

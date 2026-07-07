@@ -1,0 +1,17 @@
+alias ..="cd .."
+alias ~="cd ~"
+
+# Replace with your Bunya login host
+alias bunya="ssh $USER@bunya.hpc.uq.edu.au"
+
+# Common ls aliases
+alias ll="ls -l"
+alias la='ls -Al'
+alias lx='ls -lXB'
+alias lk='ls -lSr'
+alias lc='ls -ltcr'
+alias lu='ls -ltur'
+alias lt='ls -ltr'
+alias lm='ls -al | less'
+alias lr='ls -lR | less'
+alias tree='tree -Csu | less'

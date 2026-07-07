@@ -4,6 +4,27 @@ This guide focuses on local VS Code + R setup, plus UQ Bunya launch workflows fo
 
 It includes a compatibility fix for R >= 4.6 where some sessions fail to expose `.vsc.attach()`.
 
+## Quick install (mode based)
+
+This repository now includes an installer that can apply either HPC or local profiles.
+
+```bash
+bash install.sh hpc --dry-run
+bash install.sh hpc
+
+# Later, switch to local profile mode
+bash install.sh local
+```
+
+Mode behavior:
+- `hpc`: installs/updates managed blocks in `~/.bashrc`, `~/.bash_aliases`, `~/.vimrc`, and `~/.Rprofile`; installs managed `~/vscode.sh`, `~/vscode_big.sh`, and `~/vscode_gpu.sh`.
+- `local`: installs/updates managed blocks in the same dotfiles using local templates; removes only installer-managed HPC launcher scripts.
+
+Safety behavior:
+- Dotfiles are merged using managed block markers, so unmanaged user content is preserved.
+- If an existing launcher script is unmanaged, installer writes `*.vscode_for_r.new` instead of overwriting.
+- `--dry-run` previews actions without writing files.
+
 ## 1) Install VS Code extensions
 
 Install these extensions in VS Code:
@@ -73,7 +94,9 @@ options(languageserver.formatting_style = function(options) {
 
 ## 5) UQ Bunya: start VS Code sessions with Slurm
 
-Create the following scripts in your home directory.
+When you run `bash install.sh hpc`, these scripts are installed to your home directory.
+
+You can also copy them manually if preferred.
 
 ### ~/vscode.sh
 

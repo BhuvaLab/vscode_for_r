@@ -1,0 +1,55 @@
+"set how many lines of history to remember
+set history=700
+
+"------------------VIM Interface------------------
+set ruler "always show current position
+set cmdheight=2 "commandbar height
+
+"set backspace config
+set backspace=eol,start,indent
+set whichwrap+=<,>,h,l
+
+set ignorecase "ignore case when searching
+set smartcase " if there are caps, go case-sensitive
+
+set hlsearch "highlight search things
+set magic "set magic on, for regexps
+set showmatch "show matching braces
+
+"no sound on errors
+set noerrorbells
+set novisualbell
+
+set cursorline "highlight current line
+set incsearch " BUT do highlight as you type your search phrase
+set lazyredraw "do not redraw while running macros
+
+set number "turn on line numbers
+set numberwidth=5 " we are good upto 5 digit numbers ie 99999
+
+"-----------------Color and fonts-----------------
+syntax enable "enable syntax hl
+
+"---------------text, tab and indent--------------
+set expandtab "no real tabs
+set shiftwidth=4 " auto-indent amount when using cindent,>>, << and stuff like that
+set tabstop=4 "set the spaces for tab
+set smarttab
+
+set ai "set auto indentation
+set si "smart indent
+set wrap "wrap lines
+
+"------------------spell checking-----------------
+"pressing ,ss will toggle and untoggle spell checking
+map <leader>ss :setlocal spell!<cr>
+
+"shortcuts using <leader>
+map <leader>sn ]s
+map <leader>sp [s
+map <leader>sa zg
+map <leader>s? z=
+
+"-----------------------Misc----------------------
+"set status line
+set statusline=%F%m%r%h%w[%L][%{&ff}]%y[%p%%][%04l,%04v]

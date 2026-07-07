@@ -1,0 +1,13 @@
+# User specific environment
+if ! [[ "$PATH" =~ "$HOME/.local/bin:$HOME/bin:" ]]; then
+  PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+fi
+export PATH
+
+# R / VS Code environment
+export TERM_PROGRAM=vscode
+
+# User aliases and functions
+if [ -e ~/.bash_aliases ]; then
+  . ~/.bash_aliases
+fi
