@@ -9,6 +9,12 @@ hand, no `httpgd`-style server or port. Works for R and Python from the same
 panel. Plotting code is kept as an editable, versioned "recipe", so a follow-up
 like *"make the points smaller"* edits and re-renders rather than starting over.
 
+Everything is scoped to **one Claude session**: plots live outside the project
+entirely, in a per-session cache directory, and disappear once that session ends
+(and something next touches `cplot` — see [Session scoping](#session-scoping)
+below). Two Claude sessions in the same project each get their own plots and
+their own panel.
+
 ## How it works
 
 vscode-R's session watcher (the same `~/.vscode-R/init.R` / `.vsc.attach()`
@@ -48,11 +54,33 @@ Requires `conda` (or `mamba`) to be resolvable — either on `PATH` or via
 distribution and any environment location, including ones outside the default
 `envs_dirs`.
 
+## Session scoping
+
+Nothing `cplot` writes lives inside the project. Everything goes under:
+
+```
+~/.cache/cplot/<project-slug>-<hash>/<session-id>/
+```
+
+keyed to `$CLAUDE_CODE_SESSION_ID` — one directory per Claude session, per
+project. `cplot status` prints the exact path for the session you're in.
+
+Cleanup happens by liveness, not a hook: every `cplot` invocation (from any
+session, in any project) checks sibling session directories against
+`$CLAUDE_PID` and deletes any whose process has exited. So a session's plots
+disappear once it ends and *something* next runs `cplot` — usually close to
+immediate in practice, not guaranteed to be the exact instant the session closes.
+Run outside Claude Code (no `$CLAUDE_CODE_SESSION_ID` set) and everything falls
+back to a single shared `default` scope, kept until you clear it by hand.
+
+Because scoping is per-session, two Claude sessions working the same project get
+separate plots and separate panels automatically — nothing to configure.
+
 ## Usage
 
 ```bash
-cplot serve                                        # once per project: opens the panel
-cplot new umap-spanorm --lang r --env latest-r      # scaffold .plots/umap-spanorm/recipe.R
+cplot serve                                        # once per session: opens the panel
+cplot new umap-spanorm --lang r --env latest-r      # scaffold this session's recipe
 # edit the recipe, then:
 cplot run umap-spanorm                              # renders; the open panel picks it up
 ```
@@ -60,13 +88,13 @@ cplot run umap-spanorm                              # renders; the open panel pi
 **Only call `cplot serve` / `cplot open` once per session.** The VS Code webview API
 always opens a *new* panel — it does not refresh an existing one — so calling it again
 leaves you with duplicate panels to close by hand rather than one that updates. `cplot
-run` never touches the panel; the open panel polls `.plots/_manifest.json` on its own
+run` never touches the panel; the open panel polls this session's manifest on its own
 and picks up new versions automatically, which is how it stays live without needing to
 be re-opened.
 
-`cplot serve` also opens `.plots/_current.png` as a normal VS Code image tab — drag
-that into a bottom editor group once and it keeps refreshing in place on every render,
-independent of the gallery panel.
+`cplot serve` also opens this session's `_current.png` as a normal VS Code image tab —
+drag that into a bottom editor group once and it keeps refreshing in place on every
+render, independent of the gallery panel.
 
 A recipe is a plain script with a small front-matter block:
 
@@ -109,5 +137,16 @@ cplot log <name>           # version history for one plot
 cplot show <name> [vNNN] [--pin]   # --pin also puts it in the live tab
 cplot export <name> --to figures/fig1.png --dpi 300 --size 12x8
 cplot prune [--keep N]     # trim old versions (default: keep last 20)
-cplot status               # what cplot currently knows about this project
+cplot status               # session id, cache path, what cplot currently knows
 ```
+
+## Deleting plots
+
+```bash
+cplot clear <name>                  # delete a whole plot, every version
+cplot clear <name> --version vNNN   # delete just one version
+cplot clear --all                   # delete every plot in this session
+```
+
+There's no delete control in the panel itself — it's a passive local file with no
+way to write back to disk, so deletion is always a command.

@@ -12,7 +12,7 @@ Works for R and Python. `cp()` is the only API either language needs.
 
 ## Start of session
 
-Run once, before the first plot. Idempotent - safe to repeat.
+Run **once**, before the first plot.
 
 ```bash
 cplot serve
@@ -27,10 +27,22 @@ writes the path), or to run `cplot config --wd <workspace folder>`.
 spawns another panel - the extension never reuses one. New versions reach the open
 panel by polling on their own. Re-open only if the gallery page itself changed.
 
+## Plots are scoped to this session, not the project
+
+Everything cplot writes lives under `~/.cache/cplot/<project>-<hash>/<this Claude
+session's id>/` — never inside the project directory, never committed. `cplot
+status` prints the exact path if you need it. Another Claude session working in
+the same project gets its own directory and its own panel; nothing is shared.
+
+Cleanup is automatic but not instant: every `cplot` invocation (from any session)
+sweeps sibling session directories for this project and deletes any whose Claude
+process has exited. So a session's plots disappear once that session ends and
+someone next touches cplot - not necessarily the millisecond it closes.
+
 ## Making a plot
 
-1. `cplot new <name> --lang r|py [--env <conda env>]` scaffolds
-   `.plots/<name>/recipe.{R,py}`.
+1. `cplot new <name> --lang r|py [--env <conda env>]` scaffolds a recipe file for
+   this session (path from `cplot status`, not something to hardcode).
 2. **Write the actual code into that file** with Write/Edit.
 3. `cplot run <name>` renders it and prints the PNG path.
 4. **Read the PNG.** Always. Check axes, legend placement, overplotting, and that
@@ -86,7 +98,8 @@ large UMAPs) that costs real minutes on each replot.
 
 - Run slow recipes in the background rather than blocking the session.
 - Add caching **only when the user asks**, and write it visibly in the recipe as
-  an explicit read-or-compute against `.plots/_cache/`. Never cache silently.
+  an explicit read-or-compute against `_cache/` next to the recipe (`cplot status`
+  shows the actual path). Never cache silently.
 
 ## Format
 
@@ -107,6 +120,19 @@ cplot export <name> --to figures/fig2a.png --dpi 300 --size 12x8
 
 `--pin` copies an old version into `_current.png`, so "go back to the previous
 version" is answerable without the user clicking anything.
+
+## Deleting plots
+
+```bash
+cplot clear <name>                       # delete a whole plot, every version
+cplot clear <name> --version vNNN        # delete just one version
+cplot clear --all                        # delete every plot in this session
+```
+
+The panel itself has no delete controls by design (it's a passive local file with
+no write-back channel to disk) — deletion is always a command, run here on
+request. Only delete when the user actually asks; storage being session-scoped
+and ephemeral is not a reason to clear proactively.
 
 ## Constraints worth knowing
 
