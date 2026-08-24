@@ -15,7 +15,8 @@ CFG_DIR    = os.path.expanduser("~/.config/cplot")
 CFG        = os.path.join(CFG_DIR, "config.json")
 VSCODE_R   = os.path.expanduser("~/.vscode-R")
 KEEP       = 20
-MARKERS    = (".plots", "_targets.yaml", ".git", "pyproject.toml", ".dsproject")
+MARKERS    = ("_targets.yaml", ".git", "pyproject.toml", ".dsproject")
+CACHE_ROOT = os.path.expanduser("~/.cache/cplot")
 
 def die(msg, code=1):
     print("cplot: " + msg, file=sys.stderr); sys.exit(code)
@@ -42,13 +43,58 @@ def project_root(start=None):
         if p == d: return os.path.abspath(start or os.getcwd())
         d = p
 
+# ---------------------------------------------------------------- session scoping
+# Plots live outside the project entirely, under a directory keyed to this one
+# Claude session, so they are never committed, never accumulate across sessions,
+# and disappear (via the sweep below) once the session's process is gone.
+
+def session_id():
+    return os.environ.get("CLAUDE_CODE_SESSION_ID", "default")
+
+def is_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, ValueError, TypeError):
+        return True  # can't tell (different owner, malformed) - assume alive, don't delete on a guess
+
+def project_cache_root(root):
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(root.rstrip("/"))) or "project"
+    h = hashlib.sha256(os.path.realpath(root).encode()).hexdigest()[:8]
+    return os.path.join(CACHE_ROOT, f"{slug}-{h}")
+
+def sweep_stale_sessions(cache_root, keep):
+    """Delete other sessions' plot directories for this project once their
+    Claude process has exited. Runs on every cplot invocation, so cleanup
+    lands the next time cplot is touched anywhere - yours or anyone else's."""
+    if not os.path.isdir(cache_root): return
+    for sid in os.listdir(cache_root):
+        if sid == keep or sid.startswith("."): continue
+        sdir = os.path.join(cache_root, sid)
+        info = load(os.path.join(sdir, "_session.json"), None)
+        pid = info.get("pid") if info else None
+        if not pid or not is_alive(pid):
+            shutil.rmtree(sdir, ignore_errors=True)
+
 def plots_dir(root=None):
-    d = os.path.join(root or project_root(), ".plots")
+    root = root or project_root()
+    sid = session_id()
+    d = os.path.join(project_cache_root(root), sid)
     os.makedirs(d, exist_ok=True)
-    gi = os.path.join(d, ".gitignore")
-    if not os.path.exists(gi):
-        with open(gi, "w") as f: f.write("*\n")
+    if sid != "default":
+        save(os.path.join(d, "_session.json"),
+             {"pid": os.environ.get("CLAUDE_PID", ""), "session_id": sid,
+              "project": root, "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        sweep_stale_sessions(project_cache_root(root), sid)
     return d
+
+def panel_title():
+    root = project_root()
+    sid = session_id()
+    tag = sid[:8] if sid != "default" else "default"
+    return f"cplot: {os.path.basename(root)} \u00b7 {tag}"
 
 def plot_names(pd):
     return sorted(n for n in os.listdir(pd)
@@ -369,13 +415,49 @@ def cmd_serve(args):
     root = project_root(); pd = plots_dir(root)
     g = gallery_file(pd); build_manifest(pd)
     print(f"cplot: gallery {g}")
-    if open_panel(g): print("  panel opened in VS Code (no server, no port)")
+    if open_panel(g, title=panel_title()): print("  panel opened in VS Code (no server, no port)")
     open_live_tab(pd)
 
 def cmd_open(args):
     pd = plots_dir()
     g = gallery_file(pd); build_manifest(pd)
-    print("panel opened" if open_panel(g) else g)
+    print("panel opened" if open_panel(g, title=panel_title()) else g)
+
+def cmd_clear(args):
+    pd = plots_dir()
+    if args.all:
+        names = plot_names(pd)
+        for name in names:
+            shutil.rmtree(os.path.join(pd, name), ignore_errors=True)
+        build_manifest(pd)
+        print(f"cplot: cleared {len(names)} plot(s) in this session")
+        return
+    if not args.name:
+        die("specify a plot name, or use --all")
+    d = os.path.join(pd, args.name)
+    if not os.path.isdir(d):
+        die(f"no such plot '{args.name}'")
+    if args.version:
+        try:
+            vi = int(args.version.lstrip("vV"))
+        except ValueError:
+            die(f"bad version '{args.version}' (expected e.g. v003 or 3)")
+        tag = f"v{vi:03d}"
+        removed = [f for f in os.listdir(d) if f.startswith(tag + ".")]
+        if not removed:
+            die(f"no version {tag} for '{args.name}'")
+        for f in removed: os.remove(os.path.join(d, f))
+        if versions(pd, args.name):
+            build_manifest(pd)
+            print(f"cplot: cleared {tag} of '{args.name}'")
+        else:
+            shutil.rmtree(d, ignore_errors=True)
+            build_manifest(pd)
+            print(f"cplot: cleared {tag} of '{args.name}' (no versions left, removed the plot)")
+        return
+    shutil.rmtree(d)
+    build_manifest(pd)
+    print(f"cplot: cleared '{args.name}'")
 
 def cmd_list(args):
     pd = plots_dir()
@@ -421,12 +503,18 @@ def cmd_export(args):
     print(args.to)
 
 def cmd_status(args):
-    pd = plots_dir()
-    print(f"root       {pd}")
+    root = project_root(); cache_root = project_cache_root(root)
+    pd = plots_dir(root)
+    print(f"session    {session_id()}")
+    print(f"cache      {pd}  (outside the project - never committed, cleared when the session ends)")
     print(f"gallery    {os.path.join(pd, '_gallery.html')}")
     print(f"vscode wd  {discover_wd() or '(unknown)'}")
     print(f"plots      {len(plot_names(pd))}")
     print(f"transport  local-file webview (no server, no port)")
+    others = [d for d in (os.listdir(cache_root) if os.path.isdir(cache_root) else [])
+              if d != session_id() and not d.startswith(".")]
+    if others:
+        print(f"other live sessions for this project: {', '.join(sorted(others))}")
 
 def cmd_config(args):
     cfg = load(CFG, {})
@@ -456,6 +544,10 @@ def main():
     p.set_defaults(fn=cmd_export)
     p = sub.add_parser("prune"); p.add_argument("--keep", type=int, default=KEEP)
     p.set_defaults(fn=lambda a: prune(plots_dir(), a.keep))
+    p = sub.add_parser("clear"); p.add_argument("name", nargs="?")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--version", metavar="vNNN", help="delete one version instead of the whole plot")
+    p.set_defaults(fn=cmd_clear)
     p = sub.add_parser("status"); p.set_defaults(fn=cmd_status)
     p = sub.add_parser("config"); p.add_argument("--wd"); p.set_defaults(fn=cmd_config)
 
