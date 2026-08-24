@@ -1,0 +1,465 @@
+#!/usr/bin/python3
+"""cplot - transient plot display for Claude Code sessions.
+
+Recipes are the durable artefact; rendered PNGs are disposable versions of them.
+Display surfaces: a VS Code webview gallery (via the vscode-R request protocol)
+and a live image tab on .plots/_current.png.
+
+stdlib only, system python3, conda-independent.
+"""
+import argparse, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
+from datetime import datetime
+
+SHARE      = os.path.expanduser("~/.local/share/cplot")
+CFG_DIR    = os.path.expanduser("~/.config/cplot")
+CFG        = os.path.join(CFG_DIR, "config.json")
+VSCODE_R   = os.path.expanduser("~/.vscode-R")
+KEEP       = 20
+MARKERS    = (".plots", "_targets.yaml", ".git", "pyproject.toml", ".dsproject")
+
+def die(msg, code=1):
+    print("cplot: " + msg, file=sys.stderr); sys.exit(code)
+
+def load(path, default):
+    try:
+        with open(path) as f: return json.load(f)
+    except Exception: return default
+
+def save(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f: json.dump(obj, f, indent=1)
+    os.replace(tmp, path)
+
+# ---------------------------------------------------------------- project layout
+def project_root(start=None):
+    d = os.path.abspath(start or os.getcwd())
+    while True:
+        if any(os.path.exists(os.path.join(d, m)) for m in MARKERS) or \
+           any(f.endswith(".Rproj") for f in os.listdir(d)):
+            return d
+        p = os.path.dirname(d)
+        if p == d: return os.path.abspath(start or os.getcwd())
+        d = p
+
+def plots_dir(root=None):
+    d = os.path.join(root or project_root(), ".plots")
+    os.makedirs(d, exist_ok=True)
+    gi = os.path.join(d, ".gitignore")
+    if not os.path.exists(gi):
+        with open(gi, "w") as f: f.write("*\n")
+    return d
+
+def plot_names(pd):
+    return sorted(n for n in os.listdir(pd)
+                  if not n.startswith(("_", ".")) and os.path.isdir(os.path.join(pd, n)))
+
+def recipe_path(pd, name):
+    for ext in ("R", "py"):
+        p = os.path.join(pd, name, "recipe." + ext)
+        if os.path.exists(p): return p
+    return None
+
+def versions(pd, name):
+    d = os.path.join(pd, name)
+    if not os.path.isdir(d): return []
+    vs = sorted(int(m.group(1)) for m in
+                (re.fullmatch(r"v(\d{3})\.json", f) for f in os.listdir(d)) if m)
+    return vs
+
+# ---------------------------------------------------------------- front matter
+def front_matter(path):
+    fm = {}
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("#|"):
+                body = s[2:].strip()
+                if ":" in body:
+                    k, v = body.split(":", 1); fm[k.strip()] = v.strip()
+            elif s and not s.startswith("#"):
+                break
+    return fm
+
+def parse_size(s, default=(8.0, 5.0)):
+    if not s: return default
+    m = re.fullmatch(r"\s*([\d.]+)\s*[xX*]\s*([\d.]+)\s*", s)
+    return (float(m.group(1)), float(m.group(2))) if m else default
+
+def conda_binary():
+    """Find a real conda executable, not the shell function `conda init` installs
+    (shutil.which alone would miss that - it only sees files on PATH, and a shell
+    function isn't one). $CONDA_EXE is what conda's own init script points at the
+    real binary with, so it is checked first."""
+    for c in (os.environ.get("CONDA_EXE"), shutil.which("conda"), shutil.which("mamba")):
+        if c and os.path.exists(c):
+            return c
+    for base in ("~/miniconda3", "~/anaconda3", "~/miniforge3", "~/mambaforge",
+                 "~/miniforge", "/opt/miniconda3", "/opt/anaconda3", "/opt/conda"):
+        for sub in ("condabin/conda", "bin/conda"):
+            c = os.path.expanduser(os.path.join(base, sub))
+            if os.path.exists(c):
+                return c
+    return None
+
+def conda_envs():
+    """Map env name -> prefix path. `conda env list --json` is authoritative -
+    it is the only thing that also finds envs created outside the default envs_dirs
+    (e.g. a project env under a shared filesystem path via `conda create -p`), which
+    no amount of scanning ~/miniconda3-style directories would find."""
+    envs = {}
+    exe = conda_binary()
+    if exe:
+        try:
+            r = subprocess.run([exe, "env", "list", "--json"],
+                               capture_output=True, text=True, timeout=15)
+            data = json.loads(r.stdout)
+            root = data.get("root_prefix") or data.get("conda_prefix")
+            for p in data.get("envs", []):
+                envs["base" if p == root else os.path.basename(p)] = p
+        except Exception:
+            pass
+    if not envs:
+        for base in ("~/miniconda3", "~/anaconda3", "~/miniforge3", "~/mambaforge",
+                     "~/miniforge", "/opt/miniconda3", "/opt/anaconda3", "/opt/conda"):
+            envdir = os.path.expanduser(os.path.join(base, "envs"))
+            if os.path.isdir(envdir):
+                for name in os.listdir(envdir):
+                    envs.setdefault(name, os.path.join(envdir, name))
+    return envs
+
+def interpreter(lang, env):
+    exe = "Rscript" if lang == "r" else "python"
+    if env:
+        envs = conda_envs()
+        prefix = envs.get(env)
+        if not prefix:
+            avail = ", ".join(sorted(envs)) or "(none found - is conda on PATH or $CONDA_EXE set?)"
+            die(f"conda env '{env}' not found\n  available: {avail}")
+        p = os.path.join(prefix, "bin", exe)
+        if not os.path.exists(p):
+            die(f"env '{env}' ({prefix}) has no {exe} at {p}")
+        return p
+    p = shutil.which(exe) or shutil.which(exe + "3")
+    if not p: die(f"no {exe} on PATH; declare '#| env: <conda-env>' in the recipe")
+    return p
+
+# ---------------------------------------------------------------- vscode wd
+def discover_wd():
+    cfg = load(CFG, {})
+    req = load(os.path.join(VSCODE_R, "request.log"), None)
+    if isinstance(req, dict) and not req.get("cplot") and req.get("wd"):
+        if req["wd"] != cfg.get("vscode_wd"):
+            cfg["vscode_wd"] = req["wd"]; save(CFG, cfg)
+    return cfg.get("vscode_wd")
+
+def open_panel(gallery_file, title="cplot gallery", viewer="Two"):
+    """Open the gallery as a local-file webview.
+
+    Deliberately NOT a forwarded http:// URL: the VS Code server may run on a
+    different compute node than this session, so the webview's localhost is not
+    ours. Shared-filesystem resource loading works across nodes; ports do not.
+    """
+    wd = discover_wd()
+    if not wd:
+        print("cplot: don't know this window's VS Code workspace path yet.\n"
+              "  Run any plot in an R terminal once (httpgd writes it), or:\n"
+              "    cplot config --wd /path/to/vscode/workspace/folder\n"
+              f"  Gallery file is {gallery_file}", file=sys.stderr)
+        return False
+    req = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "pid": os.getpid(),
+           "wd": wd, "command": "webview", "file": os.path.abspath(gallery_file),
+           "title": title, "viewer": viewer, "cplot": True}
+    with open(os.path.join(VSCODE_R, "request.log"), "w") as f:
+        json.dump(req, f, separators=(",", ":")); f.write("\n")
+    with open(os.path.join(VSCODE_R, "request.lock"), "w") as f:
+        f.write("%.6f" % time.time())
+    return True
+
+def open_live_tab(pd):
+    cur = os.path.join(pd, "_current.png")
+    if not os.path.exists(cur): return
+    code = shutil.which("code")
+    if not code: return
+    marker = os.path.join(pd, "_tab_opened")
+    if os.path.exists(marker): return
+    subprocess.run([code, "-r", cur], capture_output=True)
+    open(marker, "w").write(str(time.time()))
+    print("  live tab opened - drag it into a bottom editor group once; it stays there.")
+
+# ---------------------------------------------------------------- manifest
+def build_manifest(pd):
+    plots = []
+    for name in plot_names(pd):
+        d = os.path.join(pd, name)
+        rp = recipe_path(pd, name)
+        fm = front_matter(rp) if rp else {}
+        vs = []
+        for v in versions(pd, name):
+            meta = load(os.path.join(d, f"v{v:03d}.json"), {})
+            ext = "R" if (meta.get("lang") == "r") else "py"
+            code = ""
+            cp_ = os.path.join(d, f"v{v:03d}.{ext}")
+            if os.path.exists(cp_):
+                code = open(cp_).read()
+            png = f"{name}/v{v:03d}.png"
+            if not os.path.exists(os.path.join(pd, png)): continue
+            vs.append({"v": v, "png": png, "ts": meta.get("ts", ""),
+                       "dims": meta.get("dims", ""), "runtime": meta.get("runtime", 0),
+                       "title": meta.get("title", ""), "caption": meta.get("caption", ""),
+                       "code": code})
+        if not vs: continue
+        lang = "r" if (rp or "").endswith(".R") else ("py" if rp else "")
+        if not lang:
+            last = load(os.path.join(d, f"v{versions(pd, name)[-1]:03d}.json"), {})
+            lang = last.get("lang", "")
+        plots.append({"name": name, "lang": lang,
+                      "env": fm.get("env", ""), "versions": vs,
+                      "failed": os.path.exists(os.path.join(d, "last_error.txt"))})
+    plots.sort(key=lambda p: p["versions"][-1]["ts"], reverse=True)
+    save(os.path.join(pd, "_manifest.json"),
+         {"generated": datetime.now().strftime("%H:%M:%S"), "plots": plots})
+    return plots
+
+# ---------------------------------------------------------------- run
+TEMPLATE_R = '''#| name: {name}
+#| env:  {env}
+#| title:   {name}
+#| caption: one concise sentence saying what this shows
+#| size: 8x5
+#| dpi:  150
+
+library(ggplot2)
+
+d <- data.frame(x = 1:10, y = (1:10)^2)
+p <- ggplot(d, aes(x, y)) + geom_point() + theme_minimal()
+
+cp(p)
+'''
+
+TEMPLATE_PY = '''#| name: {name}
+#| env:  {env}
+#| title:   {name}
+#| caption: one concise sentence saying what this shows
+#| size: 8x5
+#| dpi:  150
+
+import matplotlib.pyplot as plt
+
+fig, ax = plt.subplots()
+ax.plot(range(10), [v**2 for v in range(10)], "o-")
+
+cp(fig)
+'''
+
+def cmd_new(args):
+    pd = plots_dir()
+    name = args.name
+    d = os.path.join(pd, name); os.makedirs(d, exist_ok=True)
+    ext = "R" if args.lang == "r" else "py"
+    p = os.path.join(d, "recipe." + ext)
+    if os.path.exists(p) and not args.force:
+        die(f"{p} exists (use --force to overwrite)")
+    tpl = TEMPLATE_R if args.lang == "r" else TEMPLATE_PY
+    env = args.env or ("latest-r" if args.lang == "r" else "spatial-py")
+    with open(p, "w") as f: f.write(tpl.format(name=name, env=env))
+    print(p)
+
+def cmd_run(args):
+    root = project_root(); pd = plots_dir(root)
+    name = args.name
+    rp = recipe_path(pd, name)
+    if not rp: die(f"no recipe for '{name}' (try: cplot new {name} --lang r)")
+    lang = "r" if rp.endswith(".R") else "py"
+    fm = front_matter(rp)
+    w, h = parse_size(args.size or fm.get("size"))
+    dpi = float(args.dpi or fm.get("dpi") or 150)
+    env = args.env or fm.get("env")
+    exe = interpreter(lang, env)
+
+    stage = tempfile.mkdtemp(prefix="cplot-")
+    e = dict(os.environ)
+    e.update({"CPLOT_STAGE": stage, "CPLOT_NAME": name, "CPLOT_W": str(w),
+              "CPLOT_H": str(h), "CPLOT_DPI": str(dpi),
+              "CPLOT_SVG": "1" if (args.svg or fm.get("svg") in ("1", "true", "TRUE", "yes")) else "",
+              "CPLOT_SHIM": os.path.join(SHARE, "shim.R"),
+              "CPLOT_RECIPE": os.path.abspath(rp),
+              "MPLBACKEND": "Agg"})
+    if lang == "r":
+        cmd = [exe, "-e",
+               'source(Sys.getenv("CPLOT_SHIM")); '
+               'sys.source(Sys.getenv("CPLOT_RECIPE"), envir = globalenv())']
+    else:
+        cmd = [exe, os.path.join(SHARE, "boot.py"), os.path.abspath(rp)]
+
+    t0 = time.time()
+    r = subprocess.run(cmd, cwd=root, env=e, capture_output=True, text=True)
+    dt = round(time.time() - t0, 2)
+    errfile = os.path.join(pd, name, "last_error.txt")
+
+    if r.returncode != 0:
+        with open(errfile, "w") as f:
+            f.write(f"# {datetime.now():%Y-%m-%d %H:%M:%S}  exit {r.returncode}\n\n")
+            f.write(r.stdout or ""); f.write("\n"); f.write(r.stderr or "")
+        build_manifest(pd)
+        print(f"cplot: recipe FAILED (exit {r.returncode}) after {dt}s - no version created",
+              file=sys.stderr)
+        print((r.stderr or r.stdout or "").strip()[-4000:], file=sys.stderr)
+        shutil.rmtree(stage, ignore_errors=True)
+        sys.exit(1)
+    if os.path.exists(errfile): os.remove(errfile)
+
+    emitted = []
+    jl = os.path.join(stage, "emitted.jsonl")
+    if os.path.exists(jl):
+        with open(jl) as f:
+            emitted = [json.loads(l) for l in f if l.strip()]
+    if not emitted:
+        shutil.rmtree(stage, ignore_errors=True)
+        die(f"recipe ran but emitted no plots - did you call cp(...)?\n{(r.stdout or '')[-2000:]}")
+
+    out_paths = []
+    for em in emitted:
+        pname = em["name"]
+        pdir = os.path.join(pd, pname); os.makedirs(pdir, exist_ok=True)
+        v = (versions(pd, pname)[-1] + 1) if versions(pd, pname) else 1
+        tag = f"v{v:03d}"
+        dst = os.path.join(pdir, tag + ".png")
+        tmp = dst + ".tmp"
+        shutil.copyfile(em["png"], tmp); os.replace(tmp, dst)
+        if em.get("svg") and os.path.exists(em["svg"]):
+            shutil.copyfile(em["svg"], os.path.join(pdir, tag + ".svg"))
+        ext = "R" if lang == "r" else "py"
+        shutil.copyfile(rp, os.path.join(pdir, f"{tag}.{ext}"))
+        save(os.path.join(pdir, tag + ".json"),
+             {"ts": datetime.now().strftime("%H:%M:%S"), "lang": lang, "env": env or "",
+              "title": args.title or fm.get("title", ""),
+              "caption": args.caption or fm.get("caption", ""),
+              "dims": f"{em.get('w', w)}x{em.get('h', h)} in @ {int(em.get('dpi', dpi))} dpi",
+              "runtime": dt, "bytes": os.path.getsize(dst),
+              "sha": hashlib.sha256(open(rp, 'rb').read()).hexdigest()[:12]})
+        out_paths.append(dst)
+
+    cur = os.path.join(pd, "_current.png")
+    with open(out_paths[-1], "rb") as src, open(cur, "wb") as dstf:
+        dstf.write(src.read())
+    build_manifest(pd)
+    shutil.rmtree(stage, ignore_errors=True)
+    prune(pd, args.keep)
+
+    if r.stdout.strip(): print(r.stdout.strip())
+    for p in out_paths: print(p)
+
+def prune(pd, keep=KEEP):
+    keep = keep or KEEP
+    for name in plot_names(pd):
+        vs = versions(pd, name)
+        for v in vs[:-keep] if len(vs) > keep else []:
+            for f in os.listdir(os.path.join(pd, name)):
+                if f.startswith(f"v{v:03d}."):
+                    os.remove(os.path.join(pd, name, f))
+
+# ---------------------------------------------------------------- commands
+def gallery_file(pd):
+    dst = os.path.join(pd, "_gallery.html")
+    shutil.copyfile(os.path.join(SHARE, "gallery.html"), dst)
+    return dst
+
+def cmd_serve(args):
+    root = project_root(); pd = plots_dir(root)
+    g = gallery_file(pd); build_manifest(pd)
+    print(f"cplot: gallery {g}")
+    if open_panel(g): print("  panel opened in VS Code (no server, no port)")
+    open_live_tab(pd)
+
+def cmd_open(args):
+    pd = plots_dir()
+    g = gallery_file(pd); build_manifest(pd)
+    print("panel opened" if open_panel(g) else g)
+
+def cmd_list(args):
+    pd = plots_dir()
+    for name in plot_names(pd):
+        vs = versions(pd, name)
+        rp = recipe_path(pd, name)
+        origin = ""
+        if not rp:
+            for parent in plot_names(pd):
+                if name.startswith(parent + "-") and recipe_path(pd, parent):
+                    origin = f"from {parent}"; break
+        fail = " FAILED" if os.path.exists(os.path.join(pd, name, "last_error.txt")) else ""
+        label = os.path.basename(rp) if rp else (origin or "-")
+        print(f"{name:32} {len(vs):3d} versions  {label:14}{fail}")
+
+def cmd_log(args):
+    pd = plots_dir()
+    for v in versions(pd, args.name):
+        m = load(os.path.join(pd, args.name, f"v{v:03d}.json"), {})
+        print(f"v{v:03d}  {m.get('ts','')}  {m.get('runtime','')}s  {m.get('dims','')}  {m.get('sha','')}")
+
+def cmd_show(args):
+    pd = plots_dir()
+    vs = versions(pd, args.name)
+    if not vs: die(f"no versions for {args.name}")
+    v = args.version or vs[-1]
+    p = os.path.join(pd, args.name, f"v{int(v):03d}.png")
+    if not os.path.exists(p): die(f"no {p}")
+    if args.pin:
+        with open(p, "rb") as s, open(os.path.join(pd, "_current.png"), "wb") as d:
+            d.write(s.read())
+    print(p)
+
+def cmd_export(args):
+    ns = argparse.Namespace(name=args.name, size=args.size, dpi=args.dpi, env=None,
+                            svg=args.svg, keep=None, title=None, caption=None)
+    cmd_run(ns)
+    pd = plots_dir()
+    vs = versions(pd, args.name)
+    src = os.path.join(pd, args.name, f"v{vs[-1]:03d}.png")
+    os.makedirs(os.path.dirname(os.path.abspath(args.to)) or ".", exist_ok=True)
+    shutil.copyfile(src, args.to)
+    print(args.to)
+
+def cmd_status(args):
+    pd = plots_dir()
+    print(f"root       {pd}")
+    print(f"gallery    {os.path.join(pd, '_gallery.html')}")
+    print(f"vscode wd  {discover_wd() or '(unknown)'}")
+    print(f"plots      {len(plot_names(pd))}")
+    print(f"transport  local-file webview (no server, no port)")
+
+def cmd_config(args):
+    cfg = load(CFG, {})
+    if args.wd: cfg["vscode_wd"] = os.path.abspath(args.wd); save(CFG, cfg)
+    print(json.dumps(cfg, indent=1))
+
+def main():
+    ap = argparse.ArgumentParser(prog="cplot")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("new");  p.add_argument("name"); p.add_argument("--lang", choices=["r","py"], required=True)
+    p.add_argument("--env"); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_new)
+
+    p = sub.add_parser("run");  p.add_argument("name"); p.add_argument("--size"); p.add_argument("--dpi")
+    p.add_argument("--env"); p.add_argument("--svg", action="store_true")
+    p.add_argument("--title"); p.add_argument("--caption")
+    p.add_argument("--keep", type=int); p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("serve"); p.set_defaults(fn=cmd_serve)
+    p = sub.add_parser("open");  p.set_defaults(fn=cmd_open)
+    p = sub.add_parser("list");  p.set_defaults(fn=cmd_list)
+    p = sub.add_parser("log");   p.add_argument("name"); p.set_defaults(fn=cmd_log)
+    p = sub.add_parser("show");  p.add_argument("name"); p.add_argument("version", nargs="?")
+    p.add_argument("--pin", action="store_true"); p.set_defaults(fn=cmd_show)
+    p = sub.add_parser("export"); p.add_argument("name"); p.add_argument("--to", required=True)
+    p.add_argument("--size"); p.add_argument("--dpi"); p.add_argument("--svg", action="store_true")
+    p.set_defaults(fn=cmd_export)
+    p = sub.add_parser("prune"); p.add_argument("--keep", type=int, default=KEEP)
+    p.set_defaults(fn=lambda a: prune(plots_dir(), a.keep))
+    p = sub.add_parser("status"); p.set_defaults(fn=cmd_status)
+    p = sub.add_parser("config"); p.add_argument("--wd"); p.set_defaults(fn=cmd_config)
+
+    a = ap.parse_args(); a.fn(a)
+
+if __name__ == "__main__":
+    main()
