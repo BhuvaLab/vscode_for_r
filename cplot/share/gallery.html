@@ -1,0 +1,226 @@
+<!doctype html><meta charset=utf-8><title>cplot</title>
+<a id="cplotbase" href="."></a>
+<style>
+:root{--bg:#1e1e1e;--fg:#e6e6e6;--dim:#9aa0a6;--line:#333;--accent:#4ec9b0;--panel:#252526}
+#cplotbase{display:none}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;padding:0;overflow:hidden}
+body{margin:0;font:13px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--fg);overflow:hidden}
+
+/* The webview host (vscode-R's showWebView) wraps our whole page in its own
+   <body><span id="webview-content">...OUR CONTENT...</span></body>. body's
+   direct child is that span, not our elements - so the grid belongs here,
+   not on body. Confirmed by live measurement in the running panel. */
+#webview-content{display:grid;grid-template-rows:1fr auto;height:100%;width:100%;overflow:hidden}
+
+#stage{position:relative;overflow:hidden;min-height:0}
+#img{position:absolute;display:block;transform-origin:0 0;cursor:zoom-in}
+
+/* hover overlay: title + caption, no space cost when idle */
+#ov{position:absolute;left:0;right:0;bottom:0;padding:10px 14px 11px;
+    background:linear-gradient(to top,rgba(18,18,18,.94),rgba(18,18,18,.82) 60%,rgba(18,18,18,0));
+    opacity:0;transition:opacity .12s ease;pointer-events:none}
+#stage:hover #ov{opacity:1}
+#ov .t{font-size:14px;font-weight:600;letter-spacing:.01em}
+#ov .c{color:#cfd3d6;margin-top:2px}
+#ov .m{color:var(--dim);margin-top:4px;font:11px ui-monospace,monospace}
+
+#code{display:none;width:100%;height:100%;overflow:auto;padding:14px}
+#code pre{background:#1a1a1a;border:1px solid var(--line);border-radius:6px;padding:12px;
+          overflow:auto;font:12px/1.55 ui-monospace,monospace;margin:0}
+.add{background:#0d3a1e;color:#7ee2a8;display:block}.del{background:#4a1113;color:#f2a0a3;display:block}
+.ctx{display:block;color:#c9c9c9}
+
+footer{border-top:1px solid var(--line);padding:5px 8px;display:flex;gap:5px;align-items:center;
+       overflow-x:auto;background:var(--panel);min-height:30px}
+.v{padding:2px 9px;border-radius:4px;background:#333;cursor:pointer;font-variant-numeric:tabular-nums;
+   white-space:nowrap;border:1px solid #444;font-size:12px}
+.v:hover{background:#3d3d40}
+.v.on{background:var(--accent);color:#111;border-color:var(--accent);font-weight:600}
+footer .pos{margin-left:auto;color:var(--dim);font:11px ui-monospace,monospace;white-space:nowrap;padding-left:10px}
+#chip{position:absolute;right:14px;bottom:14px;background:var(--accent);color:#111;padding:5px 11px;
+      border-radius:14px;font-weight:600;cursor:pointer;display:none;font-size:12px}
+#empty{padding:20px;font:13px/1.7 ui-monospace,monospace;color:var(--dim);display:none}
+</style>
+
+<div id=stage>
+  <img id=img alt="">
+  <div id=code><pre id=pre></pre></div>
+  <div id=empty></div>
+  <div id=ov><div class=t id=ovt></div><div class=c id=ovc></div><div class=m id=ovm></div></div>
+  <div id=chip>new version</div>
+</div>
+<footer id=strip></footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const stage = document.getElementById("stage");
+const _b = document.getElementById("cplotbase");
+const BASE = (_b ? _b.getAttribute("href") : "").replace(/\.$/, "");
+
+let man = null, pi = 0, vi = 0, follow = true, showCode = false, sig = "";
+const esc = s => s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+function diff(a, b){
+  const A = (a||"").split("\n"), B = (b||"").split("\n");
+  const m = A.length, n = B.length, d = Array.from({length:m+1}, () => new Array(n+1).fill(0));
+  for (let i=m-1;i>=0;i--) for (let j=n-1;j>=0;j--)
+    d[i][j] = A[i]===B[j] ? d[i+1][j+1]+1 : Math.max(d[i+1][j], d[i][j+1]);
+  const out=[]; let i=0,j=0;
+  while (i<m && j<n){
+    if (A[i]===B[j]) { out.push(["ctx",A[i]]); i++; j++; }
+    else if (d[i+1][j] >= d[i][j+1]) { out.push(["del",A[i]]); i++; }
+    else { out.push(["add",B[j]]); j++; }
+  }
+  while (i<m) out.push(["del",A[i++]]);
+  while (j<n) out.push(["add",B[j++]]);
+  return out;
+}
+
+const plots = () => (man && man.plots) || [];
+const plot  = () => plots()[pi] || null;
+
+function renderCode(){
+  const vs = plot().versions, v = vs[vi], prev = vi > 0 ? vs[vi-1] : null;
+  $("#pre").innerHTML = prev
+    ? diff(prev.code, v.code).map(([k,l]) =>
+        `<span class="${k}">${k==="add"?"+ ":k==="del"?"- ":"  "}${esc(l)}</span>`).join("\n")
+    : '<span class="ctx">' + esc(v.code).split("\n").join('</span>\n<span class="ctx">') + '</span>';
+}
+
+function draw(){
+  const p = plot();
+  if (!p){
+    $("#img").style.display = "none"; $("#code").style.display = "none";
+    $("#strip").innerHTML = ""; $("#ov").style.display = "none";
+    const e = $("#empty"); e.style.display = "block";
+    e.textContent = "No plots yet.\n\n  cplot new my-plot --lang r\n  cplot run my-plot\n\nThis window updates on its own.";
+    return;
+  }
+  $("#empty").style.display = "none"; $("#ov").style.display = "";
+  const vs = p.versions, v = vs[vi];
+
+  $("#code").style.display = showCode ? "block" : "none";
+  $("#img").style.display  = showCode ? "none"  : "block";
+  if (showCode) renderCode(); else $("#img").src = BASE + v.png;
+
+  $("#ovt").textContent = v.title || p.name;
+  $("#ovc").textContent = v.caption || "";
+  $("#ovm").textContent = `${p.name}  v${String(v.v).padStart(3,"0")}/${vs.length}` +
+      `  ${v.ts}  ${v.dims}  ${v.runtime}s${p.env ? "  " + p.env : ""}` +
+      `   [←/→ plot  ↑/↓ version  c code  [ ] zoom  click reset]`;
+
+  $("#strip").innerHTML =
+    vs.map((x,k) => `<div class="v${k===vi?" on":""}" data-k="${k}">v${String(x.v).padStart(3,"0")}</div>`).join("") +
+    `<div class=pos>${pi+1}/${plots().length} · ${p.name}${p.failed?" · FAILED":""}</div>`;
+
+  follow = vi === vs.length - 1;
+}
+
+function load(first){
+  fetch(BASE + "_manifest.json", {cache:"no-store"}).then(r => r.json()).then(m => {
+    const s = JSON.stringify(m.plots.map(p => [p.name, p.versions.length]));
+    if (s === sig && !first) return;
+    const grew = sig && s !== sig; sig = s;
+    const prevName = plot() && plot().name;
+    man = m;
+    if (prevName){
+      const k = m.plots.findIndex(p => p.name === prevName);
+      pi = k >= 0 ? k : 0;
+    } else pi = 0;
+    const p = plot();
+    if (!p){ draw(); return; }
+    if (first || vi > p.versions.length - 1 || follow) vi = p.versions.length - 1;
+    else if (grew) $("#chip").style.display = "block";
+    draw();
+  }).catch(() => {});
+}
+
+function goPlot(d){
+  const n = plots().length; if (!n) return;
+  pi = (pi + d + n) % n; vi = plot().versions.length - 1;
+  resetZoom();
+  $("#chip").style.display = "none"; draw();
+}
+function goVersion(d){
+  const p = plot(); if (!p) return;
+  vi = Math.max(0, Math.min(p.versions.length - 1, vi + d));
+  $("#chip").style.display = "none"; draw();
+}
+
+$("#strip").onclick = e => { const t = e.target.closest(".v"); if (t){ vi = +t.dataset.k; $("#chip").style.display="none"; draw(); } };
+$("#chip").onclick  = () => { vi = plot().versions.length - 1; $("#chip").style.display="none"; draw(); };
+$("#img").onclick   = () => { resetZoom(); applyTransform(); };
+
+// --- pointer-anchored zoom ---
+// #img is absolutely positioned; base* is its "fit" geometry (object-fit:contain,
+// computed by hand since we no longer use that CSS property once zoom needs a real
+// pixel reference frame to anchor to). zoom/panX/panY layer a transform on top.
+const ZOOM_MIN = 1, ZOOM_MAX = 10, ZOOM_STEP = 1.25;
+let zoom = 1, panX = 0, panY = 0;
+let baseLeft = 0, baseTop = 0, baseWidth = 0, baseHeight = 0;
+let mouseX = null, mouseY = null;
+
+function computeBase(){
+  const sw = stage.clientWidth, sh = stage.clientHeight;
+  const nw = $("#img").naturalWidth, nh = $("#img").naturalHeight;
+  if (!nw || !nh || !sw || !sh) return;
+  const stageAR = sw / sh, imgAR = nw / nh;
+  if (imgAR > stageAR) { baseWidth = sw; baseHeight = sw / imgAR; }
+  else { baseHeight = sh; baseWidth = sh * imgAR; }
+  baseLeft = (sw - baseWidth) / 2;
+  baseTop  = (sh - baseHeight) / 2;
+}
+function applyTransform(){
+  const im = $("#img");
+  im.style.left = baseLeft + "px"; im.style.top = baseTop + "px";
+  im.style.width = baseWidth + "px"; im.style.height = baseHeight + "px";
+  im.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+}
+function resetZoom(){ zoom = 1; panX = 0; panY = 0; }
+function fitImage(){ computeBase(); applyTransform(); }
+$("#img").addEventListener("load", fitImage);
+
+function currentPointer(){
+  if (mouseX !== null) return [mouseX, mouseY];
+  const r = stage.getBoundingClientRect();
+  return [r.left + r.width / 2, r.top + r.height / 2];
+}
+function zoomAt(clientX, clientY, factor){
+  if (!baseWidth || !baseHeight) return;
+  const newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom * factor));
+  if (newZoom === zoom) return;
+  const r = $("#img").getBoundingClientRect();
+  const fx = (clientX - r.left) / r.width, fy = (clientY - r.top) / r.height;
+  const lx = fx * baseWidth, ly = fy * baseHeight;
+  const sr = stage.getBoundingClientRect();
+  panX = clientX - sr.left - baseLeft - lx * newZoom;
+  panY = clientY - sr.top  - baseTop  - ly * newZoom;
+  zoom = newZoom;
+  if (zoom === ZOOM_MIN) { panX = 0; panY = 0; }
+  applyTransform();
+}
+stage.addEventListener("mousemove", e => { mouseX = e.clientX; mouseY = e.clientY; });
+
+addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft")  { goPlot(-1);    e.preventDefault(); }
+  if (e.key === "ArrowRight") { goPlot(+1);    e.preventDefault(); }
+  if (e.key === "ArrowUp")    { goVersion(-1); e.preventDefault(); }
+  if (e.key === "ArrowDown")  { goVersion(+1); e.preventDefault(); }
+  if (e.key === "c") { showCode = !showCode; draw(); }
+  if (e.key === "[") { const [x,y] = currentPointer(); zoomAt(x, y, 1 / ZOOM_STEP); e.preventDefault(); }
+  if (e.key === "]") { const [x,y] = currentPointer(); zoomAt(x, y, ZOOM_STEP);     e.preventDefault(); }
+});
+
+function fitViewport(){
+  // The webview host wraps this page inside its own document, so a
+  // height:100% chain through html/body is not reliable. window.innerHeight
+  // is: it is this page's own viewport, live-updated on panel resize.
+  document.body.style.height = window.innerHeight + "px";
+  document.body.style.width  = window.innerWidth + "px";
+}
+fitViewport();
+addEventListener("resize", () => { fitViewport(); resetZoom(); fitImage(); });
+
+load(true); setInterval(load, 750);
+</script>

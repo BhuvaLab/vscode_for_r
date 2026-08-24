@@ -366,6 +366,20 @@ any(search() == "tools:vscode")
 
 Both should return `TRUE`.
 
+## 8) cplot: transient plot display for Claude Code
+
+If you use Claude Code alongside this setup, [`cplot/`](cplot/) gives it a plotting
+window inside VS Code — plots from R or Python render into a panel automatically as
+you work, with the plotting code kept as an editable, versioned recipe rather than a
+one-off temp file. It's built on the same session-watcher machinery section 4 above
+sets up, so if `.vsc.attach` works for you, this works too.
+
+```bash
+bash cplot/install.sh
+```
+
+See [`cplot/README.md`](cplot/README.md) for how it works, usage, and keybindings.
+
 ## References
 
 - VS Code R quickstart: https://code.visualstudio.com/docs/languages/r
