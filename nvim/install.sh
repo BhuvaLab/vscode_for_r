@@ -23,7 +23,7 @@ Usage: $SCRIPT_NAME [--with-tools] [--dry-run]
 Installs the Neovim + tmux setup for R/Quarto:
   ~/.config/nvim/                     Neovim config (lazy.nvim, R.nvim, Quarto, LSP)
   ~/.tmux.conf                        managed block (prefix C-a, Neovim-safe settings)
-  ~/.local/bin/tmux-claude            Slurm interactive session launcher
+  ~/.local/bin/tmux-srun              Slurm interactive session launcher
   ~/.bashrc / ~/.zshrc                managed block adding ~/.local/bin to PATH
 
 Options:
@@ -145,11 +145,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. tmux-claude launcher
+# 3. tmux-srun launcher
 # ---------------------------------------------------------------------------
 log ""
 log "== Slurm launcher =="
-install_file "$NVIM_ROOT/bin/tmux-claude" "$HOME/.local/bin/tmux-claude" 1
+install_file "$NVIM_ROOT/bin/tmux-srun" "$HOME/.local/bin/tmux-srun" 1
+
+# Migration: this launcher used to be called tmux-claude. Remove the old copy
+# so an upgraded install does not leave two diverging scripts on PATH.
+if [[ -f "$HOME/.local/bin/tmux-claude" ]]; then
+  if (( DRY_RUN )); then
+    log "[dry-run] remove superseded: $HOME/.local/bin/tmux-claude"
+  else
+    rm -f "$HOME/.local/bin/tmux-claude"
+    log "removed superseded: $HOME/.local/bin/tmux-claude (renamed to tmux-srun)"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 4. PATH block in whichever shells the user actually has
@@ -159,7 +170,7 @@ log "== shell PATH =="
 PATH_BLOCK="$(mktemp)"
 cat > "$PATH_BLOCK" <<'BLOCK'
 # User-local binaries: Neovim, ripgrep, fd, ruff, basedpyright, radian,
-# tmux-claude. Placed after any conda init so ~/.local/bin wins over an older
+# tmux-srun. Placed after any conda init so ~/.local/bin wins over an older
 # system nvim (Bunya ships 0.8.0, too old for this config).
 export PATH="$HOME/.local/bin:$PATH"
 BLOCK

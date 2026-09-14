@@ -399,11 +399,12 @@ bash nvim/install.sh --with-tools  # also fetch Neovim 0.12, ripgrep, fd, LSPs
 ```
 
 Installing this changes nothing about your VS Code setup; the two are
-independent. It also ships `tmux-claude`, which opens a tmux session running a
-Slurm interactive job for Claude Code:
+independent. It also ships `tmux-srun`, which opens a named tmux session running
+a Slurm interactive job — detach, drop your connection, reattach later:
 
 ```bash
-tmux-claude                  # 72h, 4 cores, 32 GB, ready for `claude`
+tmux-srun analysis           # 72h, 4 cores, 32 GB, ready for `claude`
+tmux-srun bigfit --cpus 8 --mem 64G --time 8:00:00
 ```
 
 See [`nvim/README.md`](nvim/README.md) for keymaps, the plots-over-SSH recipe,

@@ -17,7 +17,7 @@ independent: installing this changes nothing about your VS Code setup.
 - **[quarto-nvim](https://github.com/quarto-dev/quarto-nvim) + [otter.nvim](https://github.com/jmbuhr/otter.nvim)** — completion and diagnostics *inside* ```` ```{r} ```` chunks, which is the part most ad-hoc setups miss
 - **Python**: basedpyright + ruff, following whichever conda env is active
 - **tmux** preconfigured with the settings Neovim needs (see below) and `Ctrl-a` prefix
-- **`tmux-claude`** — one command to open a persistent tmux session running a Slurm interactive job, for Claude Code
+- **`tmux-srun`** — one command to open a named, persistent tmux session running a Slurm interactive job, for Claude Code or anything else
 
 ## Install
 
@@ -35,7 +35,7 @@ That installs:
 |---|---|
 | `~/.config/nvim/` | the Neovim config (13 Lua files + `CHEATSHEET.md`) |
 | `~/.tmux.conf` | a **managed block** — your existing tmux settings are preserved |
-| `~/.local/bin/tmux-claude` | the Slurm session launcher |
+| `~/.local/bin/tmux-srun` | the Slurm session launcher |
 | `~/.bashrc`, `~/.zshrc` | a managed block putting `~/.local/bin` first on `PATH` |
 
 It then **reports** which command-line tools are missing. To fetch them:
@@ -85,14 +85,23 @@ The ones you'll use constantly:
 | `\rv` | `View()` the data frame under the cursor |
 | `Ctrl-h/j/k/l` | move between Neovim splits **and** tmux panes |
 
-## tmux-claude: persistent Slurm sessions
+## tmux-srun: persistent Slurm sessions
+
+Takes a **session name** (required), which becomes both the tmux session name
+and the SLURM job name, so `squeue` shows what each allocation is for:
 
 ```bash
-tmux-claude                       # 72h, 4 cores, 32 GB
-tmux-claude --time 8:00:00 --cpus 8 --mem 64G
-tmux-claude --dir /scratch/project_mnt/<PROJECT>/work
-tmux-claude --status              # what's running
+tmux-srun analysis                # 72h, 4 cores, 32 GB
+tmux-srun bigfit --time 8:00:00 --cpus 8 --mem 64G
+tmux-srun proj --dir /scratch/project_mnt/<PROJECT>/work
+tmux-srun analysis --attach       # reattach only, never allocate
+tmux-srun --status                # what's running (no name needed)
 ```
+
+`--time`, `--cpus` and `--mem` override the defaults when the allocation is
+**created**. A running allocation cannot be resized, so passing them while
+reattaching to a live session prints a warning and reattaches unchanged — end
+that job first (`scancel -n <name>`) or use a different session name.
 
 tmux runs on the **login node**; the Slurm allocation runs inside it:
 
@@ -100,7 +109,7 @@ tmux runs on the **login node**; the Slurm allocation runs inside it:
 login node                     compute node
 +-------------------+
 | tmux session      |  srun --pty
-|   +-------------+ | ----------->  bash  ->  claude
+|   +-------------+ | ----------->  bash  ->  claude, R, ...
 |   | your shell  | |
 |   +-------------+ |
 +-------------------+
@@ -111,9 +120,11 @@ still running. This ordering matters: tmux on the *compute* node would strand
 the session, since compute nodes change every job.
 
 **Reattaching:** the session lives on one login node (bunya1–4). SSH back to
-the same one — the script prints which. Defaults are overridable with
-`--account` or `TMUX_CLAUDE_ACCOUNT` (default `a_frazer`, matching this repo's
-`vscode.sh` scripts).
+the same one — the script prints which, and `tmux-srun <name>` reattaches
+rather than allocating again. Defaults are overridable per-run with the flags
+above, or persistently via `TMUX_SRUN_TIME`, `TMUX_SRUN_CPUS`, `TMUX_SRUN_MEM`,
+`TMUX_SRUN_WORKDIR` and `TMUX_SRUN_ACCOUNT` (default `a_frazer`, matching this
+repo's `vscode.sh` scripts).
 
 ## Plots over SSH
 
@@ -184,4 +195,4 @@ If `.qmd` chunks have no completion, check that treesitter is on `main`
 (`:Lazy`) and that the `markdown` parser is installed (`:checkhealth nvim-treesitter`).
 
 To uninstall, delete `~/.config/nvim`, remove the managed blocks from
-`~/.tmux.conf` and your shell rc, and delete `~/.local/bin/tmux-claude`.
+`~/.tmux.conf` and your shell rc, and delete `~/.local/bin/tmux-srun`.
