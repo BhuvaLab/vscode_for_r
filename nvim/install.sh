@@ -23,7 +23,7 @@ Usage: $SCRIPT_NAME [--with-tools] [--dry-run]
 Installs the Neovim + tmux setup for R/Quarto:
   ~/.config/nvim/                     Neovim config (lazy.nvim, R.nvim, Quarto, LSP)
   ~/.tmux.conf                        managed block (prefix C-a, Neovim-safe settings)
-  ~/.local/bin/tmux-srun              Slurm interactive session launcher
+  ~/.local/bin/tmux-srun              persistent Slurm workbench launcher
   ~/.bashrc / ~/.zshrc                managed block adding ~/.local/bin to PATH
 
 Options:

@@ -17,7 +17,7 @@ independent: installing this changes nothing about your VS Code setup.
 - **[quarto-nvim](https://github.com/quarto-dev/quarto-nvim) + [otter.nvim](https://github.com/jmbuhr/otter.nvim)** — completion and diagnostics *inside* ```` ```{r} ```` chunks, which is the part most ad-hoc setups miss
 - **Python**: basedpyright + ruff, following whichever conda env is active
 - **tmux** preconfigured with the settings Neovim needs (see below) and `Ctrl-a` prefix
-- **`tmux-srun`** — one command to open a named, persistent tmux session running a Slurm interactive job, for Claude Code or anything else
+- **`tmux-srun`** — one command for a named, persistent Slurm allocation with tmux inside it, rejoinable from any login node, for Claude Code or anything else
 
 ## Install
 
@@ -88,43 +88,57 @@ The ones you'll use constantly:
 ## tmux-srun: persistent Slurm sessions
 
 Takes a **session name** (required), which becomes both the tmux session name
-and the SLURM job name, so `squeue` shows what each allocation is for:
+and the SLURM job name — that is how the session is found again, so it must be
+unique among your jobs.
 
 ```bash
 tmux-srun analysis                # 72h, 4 cores, 32 GB
 tmux-srun bigfit --time 8:00:00 --cpus 8 --mem 64G
 tmux-srun proj --dir /scratch/project_mnt/<PROJECT>/work
 tmux-srun analysis --attach       # reattach only, never allocate
+tmux-srun analysis --end          # cancel the job, free the cores
 tmux-srun --status                # what's running (no name needed)
 ```
 
 `--time`, `--cpus` and `--mem` override the defaults when the allocation is
 **created**. A running allocation cannot be resized, so passing them while
 reattaching to a live session prints a warning and reattaches unchanged — end
-that job first (`scancel -n <name>`) or use a different session name.
+that job first (`tmux-srun <name> --end`) or use a different session name.
 
-tmux runs on the **login node**; the Slurm allocation runs inside it:
+The job is submitted with `sbatch` and holds the node with `sleep infinity`.
+tmux runs **inside that job, on the compute node**:
 
 ```
-login node                     compute node
+any login node                 compute node
 +-------------------+
-| tmux session      |  srun --pty
-|   +-------------+ | ----------->  bash  ->  claude, R, ...
-|   | your shell  | |
-|   +-------------+ |
-+-------------------+
+| your shell        |  srun --overlap --jobid=N
+|                   | ----------->  tmux session
+|                   |                 +------------------------+
++-------------------+                 | bash -> claude, R, ... |
+                                      +------------------------+
 ```
+
+**Reattaching works from any login node**, and from any machine: `tmux-srun
+<name>` asks the scheduler where the job is and routes a new job step to it.
+That is why the ordering is this way round. The earlier design ran tmux on the
+login node, which tied the session to whichever node you happened to land on —
+and `bunya.rcc.uq.edu.au` round-robins between bunya4 and bunya5, with bunya1–3
+also reachable, so roughly half of all logins couldn't see the session.
 
 Detach with `Ctrl-a d`, drop your connection, reconnect later and the job is
-still running. This ordering matters: tmux on the *compute* node would strand
-the session, since compute nodes change every job.
+still running. Because the allocation is no longer a child of a terminal,
+losing the login node no longer takes the job with it.
 
-**Reattaching:** the session lives on one login node (bunya1–4). SSH back to
-the same one — the script prints which, and `tmux-srun <name>` reattaches
-rather than allocating again. Defaults are overridable per-run with the flags
-above, or persistently via `TMUX_SRUN_TIME`, `TMUX_SRUN_CPUS`, `TMUX_SRUN_MEM`,
-`TMUX_SRUN_WORKDIR` and `TMUX_SRUN_ACCOUNT` (default `a_frazer`, matching this
-repo's `vscode.sh` scripts).
+**The cost:** `sleep infinity` holds the cores for the full walltime whether
+you use them or not. Keep the allocation small (the 4 core / 32 GB default is
+deliberate) and end it when you're done with `tmux-srun <name> --end`. Real
+compute still belongs in its own `sbatch` job.
+
+A queued job is waited on for `TMUX_SRUN_WAIT` seconds (default 600); on
+timeout the job stays queued and nothing is cancelled. Other defaults are
+overridable per-run with the flags above, or persistently via `TMUX_SRUN_TIME`,
+`TMUX_SRUN_CPUS`, `TMUX_SRUN_MEM`, `TMUX_SRUN_WORKDIR` and `TMUX_SRUN_ACCOUNT`
+(default `a_frazer`, matching this repo's `vscode.sh` scripts).
 
 ## Plots over SSH
 

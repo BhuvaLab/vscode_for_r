@@ -1,30 +1,49 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  tmux-srun - open a named, persistent tmux session on a Bunya LOGIN node and
-#  run an interactive SLURM allocation inside it.
+#  tmux-srun - a named, persistent workbench allocation you can rejoin from
+#  ANY login node, on any machine.
 #
 #  Built for running Claude Code on a compute node, but the shell it gives you
 #  is a plain bash login shell - run whatever you like in it.
 #
-#  ARCHITECTURE (this ordering matters):
+#  ARCHITECTURE (this ordering matters, and it is the REVERSE of the old one):
 #
-#      login node                     compute node
+#      any login node                 compute node
 #      +-------------------+
-#      | tmux session      |  srun --pty
-#      |   +-------------+ | ----------->  bash  ->  claude, R, python, ...
-#      |   | your shell  | |
-#      |   +-------------+ |
-#      +-------------------+
+#      | your shell        |  srun --overlap --jobid=N
+#      |                   | ----------->  tmux session
+#      |                   |                 +------------------------+
+#      +-------------------+                 | bash -> claude, R, ... |
+#                                            +------------------------+
 #
-#  tmux runs on the LOGIN node, the allocation runs INSIDE it. That way you can
-#  detach (Ctrl-a d), drop your SSH connection, and the job keeps running -
-#  reattach later and the session is exactly where you left it.
+#  The job is submitted with sbatch and holds the node with `sleep infinity`.
+#  tmux runs INSIDE that job, on the compute node. To rejoin, SLURM routes a
+#  new job step to wherever the job is - so it does not matter which login
+#  node you land on.
 #
-#  Running tmux on the compute node instead would strand the session: compute
-#  nodes change every job and you cannot reliably SSH back to them.
+#  WHY THIS CHANGED (2026-09-15). The old design ran tmux on the LOGIN node
+#  with `srun --pty` inside it, and its own header flagged the consequence:
+#  the session lived on one login node and you had to SSH back to that same
+#  one. That is not a small inconvenience - bunya.rcc.uq.edu.au resolves to
+#  TWO addresses (bunya4 203.22.86.173 and bunya5 203.22.86.176) and
+#  round-robins between them, with bunya1-3 also reachable. So roughly half of
+#  all logins landed somewhere that could not see the session, and a session
+#  started on bunya1-3 was invisible from the generic name entirely.
 #
-#  GOTCHA: the session lives on ONE login node (bunya1..4). To reattach you
-#  must SSH back to the SAME one. This script prints which node to return to.
+#  Two further gains, both from sbatch rather than srun --pty:
+#    * The allocation is not tethered to a terminal. Under the old design the
+#      job was a child of the login-node tmux; killing that tmux (or losing
+#      the login node) took the allocation with it.
+#    * It survives a dropped connection with nothing held open at all.
+#
+#  THE COST, stated plainly: `sleep infinity` holds the cores for the FULL
+#  walltime whether you use them or not, where the old srun released them the
+#  moment you exited the shell. Keep the allocation small (the 4 core / 32G
+#  default is deliberate), and end it when you are done:
+#
+#      tmux-srun <name> --end
+#
+#  Real compute still belongs in its own sbatch job, not in here.
 #
 #  Usage:
 #     tmux-srun <session-name>              # 72h, 4 cores, 32G  (defaults)
@@ -32,9 +51,11 @@
 #     tmux-srun bigmem --cpus 8 --mem 64G
 #     tmux-srun proj --dir /scratch/project_mnt/<PROJECT>/work
 #     tmux-srun analysis --attach           # reattach only, never allocate
+#     tmux-srun analysis --end              # cancel the job, free the cores
 #     tmux-srun --status                    # what's running right now
 #
-#  The session name is also used as the SLURM job name, so `squeue` shows it.
+#  The session name is also the SLURM job name - that is how the session is
+#  found from a different login node, so it must be unique among your jobs.
 # ============================================================================
 set -uo pipefail
 
@@ -47,13 +68,15 @@ PARTITION="${TMUX_SRUN_PARTITION:-general}"
 # Default to personal scratch: RCC guidance is that job I/O must not land in
 # /home (50 GB quota, exceeding it risks account lockout).
 WORKDIR="${TMUX_SRUN_WORKDIR:-/scratch/user/$USER}"
+# How long to wait for a PENDING job to start before giving up and telling you
+# to come back. The job is NOT cancelled on timeout - it stays queued.
+WAIT_SECS="${TMUX_SRUN_WAIT:-600}"
 ATTACH_ONLY=0
 STATUS_ONLY=0
-# Records resource flags the user passed explicitly, so that reattaching to an
-# existing session can say those values are NOT being applied.
+END_ONLY=0
 EXPLICIT_RES=""
 
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,58p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "tmux-srun: $*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
@@ -66,6 +89,7 @@ while [ $# -gt 0 ]; do
     -p|--partition) PARTITION="$2"; shift 2 ;;
     -a|--attach)    ATTACH_ONLY=1; shift ;;
     -s|--status)    STATUS_ONLY=1; shift ;;
+    -e|--end)       END_ONLY=1; shift ;;
     -h|--help)      usage; exit 0 ;;
     -*) echo "tmux-srun: unknown option '$1' (try --help)" >&2; exit 2 ;;
     *)
@@ -74,24 +98,33 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# jobid_for <name> -> the newest RUNNING job with that name, or empty.
+# This is the whole point of the redesign: it is a scheduler query, so it
+# returns the same answer from every login node and from any machine.
+jobid_for() {
+  squeue -u "$USER" -h -n "$1" -o "%i %T" 2>/dev/null \
+    | awk '$2=="RUNNING"{print $1}' | tail -1
+}
+jobid_any() {
+  squeue -u "$USER" -h -n "$1" -o "%i" 2>/dev/null | tail -1
+}
+state_of() { squeue -j "$1" -h -o "%T" 2>/dev/null; }
+
 # ---------------------------------------------------------------------------
-# --status: show sessions and jobs, then exit. The only mode not needing a name.
+# --status: scheduler-wide, so it is honest from anywhere. The old version
+# ran `tmux ls` locally, which reported "(none)" whenever you were on the
+# wrong login node - exactly the failure this rewrite removes.
 # ---------------------------------------------------------------------------
 if [ "$STATUS_ONLY" -eq 1 ]; then
-  echo "Login node : $(hostname -s)"
+  echo "This host  : $(hostname -s)"
   echo
-  echo "tmux sessions here:"
-  tmux ls 2>/dev/null | sed 's/^/  /' || echo "  (none on this login node)"
+  echo "Your SLURM jobs (workbench sessions appear by name):"
+  squeue -u "$USER" -o "  %.10i %.14j %.2t %.12L %.4C %.8m %.14R" 2>/dev/null
   echo
-  echo "Your SLURM jobs:"
-  squeue -u "$USER" -o "  %.10i %.10j %.2t %.12L %.4C %.8m %.12R" 2>/dev/null
+  echo "Reattach any RUNNING one with:  tmux-srun <name>"
   exit 0
 fi
 
-# ---------------------------------------------------------------------------
-# The session name is required: it names both the tmux session and the SLURM
-# job, so an unnamed session would be impossible to tell apart in `squeue`.
-# ---------------------------------------------------------------------------
 if [ -z "$SESSION" ]; then
   echo "tmux-srun: a session name is required." >&2
   echo >&2
@@ -107,77 +140,149 @@ case "$SESSION" in
 esac
 
 # ---------------------------------------------------------------------------
-# Guards
+# --end: give back the cores. This matters more than it used to - `sleep
+# infinity` will hold them to the walltime otherwise.
 # ---------------------------------------------------------------------------
-# Already inside an allocation: nesting srun here would create a job STEP of
-# the current job, not a new job - silently giving you the wrong thing.
-if [ -n "${SLURM_JOB_ID:-}" ] && [ "$ATTACH_ONLY" -eq 0 ]; then
-  die "already inside SLURM job $SLURM_JOB_ID (on $(hostname -s)).
-        Run this from a LOGIN node, not from within an allocation.
-        To reuse this allocation, just run your command directly."
+if [ "$END_ONLY" -eq 1 ]; then
+  JID=$(jobid_any "$SESSION")
+  [ -z "$JID" ] && die "no job named '$SESSION' in the queue."
+  echo "Cancelling job $JID ('$SESSION'). Anything running inside it dies with it."
+  scancel "$JID" && echo "done."
+  exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# Guards
+# ---------------------------------------------------------------------------
 # Nested tmux: attaching from inside tmux detaches the outer client.
-if [ -n "${TMUX:-}" ]; then
+#
+# $TMUX alone is NOT sufficient evidence. srun --pty exports the caller's
+# environment, so a shell on a COMPUTE node inherits the login node's $TMUX
+# and looks nested when it is not - the socket named there lives on the login
+# node and does not exist here. Nor is testing the socket file with -S enough:
+# a stale socket survives on the compute node with no server behind it (seen
+# on bun147, 2026-09-15, where -S passed but `tmux ls` reported no server).
+# The only authoritative check is asking a server to answer on that socket.
+# ${TMUX%%,*} is the socket path; $TMUX is path,pid,session.
+if [ -n "${TMUX:-}" ] && tmux -S "${TMUX%%,*}" has-session 2>/dev/null; then
   die "already inside tmux. Detach first (Ctrl-a d), or switch with:
         tmux switch-client -t $SESSION"
 fi
 
-command -v tmux >/dev/null || die "tmux not found"
-
-# ---------------------------------------------------------------------------
-# Existing session -> just reattach. Never allocate a second job by accident.
-# ---------------------------------------------------------------------------
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  # Resource flags only take effect when an allocation is CREATED. Reattaching
-  # to a live session cannot resize it, so say so rather than let the user
-  # believe they got the resources they just asked for.
-  if [ -n "$EXPLICIT_RES" ]; then
-    echo "tmux-srun: session '$SESSION' already exists;" >&2
-    echo "           ignoring requested${EXPLICIT_RES} - a running allocation cannot be resized." >&2
-    echo "           For different resources, end that session's job first (exit the" >&2
-    echo "           shell, or: scancel -n $SESSION) then run tmux-srun again," >&2
-    echo "           or start a separate session under another name." >&2
-    echo >&2
+# Already inside the workbench job: the tmux server is local, so talk to it
+# directly rather than routing a job step back into the node we are on.
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+  if [ "$(squeue -j "$SLURM_JOB_ID" -h -o '%j' 2>/dev/null)" = "$SESSION" ]; then
+    echo "Already inside job $SLURM_JOB_ID on $(hostname -s); attaching locally."
+    exec tmux new-session -A -s "$SESSION" -c "$WORKDIR"
   fi
-  echo "Reattaching to existing tmux session '$SESSION' on $(hostname -s)."
-  exec tmux attach -t "$SESSION"
+  die "already inside SLURM job $SLURM_JOB_ID (on $(hostname -s)), which is not
+        '$SESSION'. Run this from a login node, or use this allocation directly."
 fi
 
-[ "$ATTACH_ONLY" -eq 1 ] && die "no tmux session named '$SESSION' on $(hostname -s).
-        It may be on a different login node - check with: tmux-srun --status"
+command -v tmux >/dev/null || die "tmux not found"
+command -v squeue >/dev/null || die "squeue not found - is SLURM on PATH?"
 
-command -v srun >/dev/null || die "srun not found - are you on a login node?"
+# ---------------------------------------------------------------------------
+# attach_to <jobid>: route a login shell into the job and join the tmux
+# session there, creating it on first use. `new-session -A` is attach-or-create
+# in one call, so this is the same command whether the session exists yet.
+#
+# --overlap is required: without it the step waits for resources the job's own
+# `sleep infinity` step already holds, and blocks forever.
+# --cpu-bind=none stops a stale CPU-bind mask being inherited when this is run
+# from inside another allocation ("CPU binding outside of job step allocation").
+# The thread caps are exported here, not in the job: a multithreaded BLAS reads
+# the HOST core count (192 on a general node), not the cgroup limit.
+# ---------------------------------------------------------------------------
+attach_to() {
+  local jid="$1" node
+  node=$(squeue -j "$jid" -h -o "%N" 2>/dev/null)
+  echo "Attaching to '$SESSION' (job $jid on ${node:-?}) - detach with Ctrl-a d."
+  export OMP_NUM_THREADS="$CPUS" OPENBLAS_NUM_THREADS="$CPUS" MKL_NUM_THREADS="$CPUS"
+  exec srun --overlap --jobid="$jid" --cpu-bind=none --export=ALL --pty \
+       tmux new-session -A -s "$SESSION" -c "$WORKDIR"
+}
+
+# wait_running <jobid>: block until the job starts, or give up without
+# cancelling it. Needed because sbatch returns as soon as the job is QUEUED.
+wait_running() {
+  local jid="$1" waited=0 st
+  while :; do
+    st=$(state_of "$jid")
+    [ "$st" = "RUNNING" ] && return 0
+    if [ -z "$st" ]; then
+      echo >&2; die "job $jid left the queue before starting (check: sacct -j $jid)"
+    fi
+    if [ "$waited" -ge "$WAIT_SECS" ]; then
+      echo >&2
+      echo "tmux-srun: job $jid is still $st after ${WAIT_SECS}s. It is STILL QUEUED -" >&2
+      echo "           nothing was cancelled. Reattach when it starts with:" >&2
+      echo "             tmux-srun $SESSION" >&2
+      exit 0
+    fi
+    [ "$waited" -eq 0 ] && printf "Waiting for job %s to start (%s)" "$jid" "$st"
+    printf "."
+    sleep 5; waited=$((waited + 5))
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Existing job -> rejoin it. Never allocate a second one by accident.
+# ---------------------------------------------------------------------------
+JID=$(jobid_for "$SESSION")
+if [ -n "$JID" ]; then
+  if [ -n "$EXPLICIT_RES" ]; then
+    echo "tmux-srun: session '$SESSION' is already running as job $JID;" >&2
+    echo "           ignoring requested${EXPLICIT_RES} - a running allocation cannot be resized." >&2
+    echo "           For different resources: tmux-srun $SESSION --end, then start it again." >&2
+    echo >&2
+  fi
+  attach_to "$JID"
+fi
+
+# Queued but not yet running: wait for it rather than submitting a duplicate.
+JID=$(jobid_any "$SESSION")
+if [ -n "$JID" ]; then
+  echo "Session '$SESSION' is queued as job $JID ($(state_of "$JID"))."
+  wait_running "$JID"; echo
+  attach_to "$JID"
+fi
+
+[ "$ATTACH_ONLY" -eq 1 ] && die "no job named '$SESSION' in the queue.
+        Check what you have with: tmux-srun --status"
+
+command -v sbatch >/dev/null || die "sbatch not found - are you on a login node?"
 [ -d "$WORKDIR" ] || die "working directory does not exist: $WORKDIR"
 
 # ---------------------------------------------------------------------------
-# Build the interactive allocation command.
+# Submit the workbench. It does nothing but hold the allocation; every
+# interactive shell is a separate --overlap step joined to it later.
 #
-# OMP/BLAS thread caps: a multithreaded BLAS reads the HOST core count (192 on
-# a general node), not your cgroup limit, and will happily spawn 192 threads
-# inside a 4-core allocation. Cap it at the allocation size.
+# Output goes to personal scratch, never /home (50 GB quota). The job would
+# otherwise write slurm-<id>.out into the submitting directory.
 # ---------------------------------------------------------------------------
-SRUN_CMD="export OMP_NUM_THREADS=${CPUS} OPENBLAS_NUM_THREADS=${CPUS} MKL_NUM_THREADS=${CPUS}; \
-srun --account=${ACCOUNT} --partition=${PARTITION} \
---nodes=1 --ntasks=1 --cpus-per-task=${CPUS} --mem=${MEM} \
---time=${WALLTIME} --job-name=${SESSION} --pty bash -l"
+LOGDIR="/scratch/user/$USER/.tmux-srun"
+mkdir -p "$LOGDIR" 2>/dev/null || LOGDIR="/scratch/user/$USER"
 
 cat <<INFO
-Starting interactive allocation
+Submitting workbench allocation
   session    : ${SESSION}
-  login node : $(hostname -s)   <- SSH back HERE to reattach
   account    : ${ACCOUNT}      partition: ${PARTITION}
   resources  : ${CPUS} cores, ${MEM}, ${WALLTIME}
   workdir    : ${WORKDIR}
 
-Waiting for the scheduler. Detach with Ctrl-a d (job keeps running).
-Reattach with:  tmux-srun ${SESSION}
+Rejoin from ANY login node with:  tmux-srun ${SESSION}
+End it (frees the cores) with:    tmux-srun ${SESSION} --end
 INFO
 
-# Start the session running a normal login shell, then send the srun into it.
-# Deliberately NOT `tmux new-session <cmd>`: if the allocation fails or the job
-# ends, this leaves you in a shell inside tmux to see the error and retry,
-# rather than the window closing and taking the message with it.
-tmux new-session -d -s "$SESSION" -c "$WORKDIR"
-tmux send-keys -t "$SESSION" "$SRUN_CMD" Enter
-exec tmux attach -t "$SESSION"
+JID=$(sbatch --parsable \
+  --job-name="${SESSION}" --account="${ACCOUNT}" --partition="${PARTITION}" \
+  --nodes=1 --ntasks=1 --cpus-per-task="${CPUS}" --mem="${MEM}" \
+  --time="${WALLTIME}" --chdir="${WORKDIR}" \
+  -o "${LOGDIR}/${SESSION}-%j.out" -e "${LOGDIR}/${SESSION}-%j.out" \
+  --wrap='sleep infinity') || die "sbatch failed"
+
+echo "submitted job ${JID}"
+wait_running "$JID"; echo
+attach_to "$JID"
