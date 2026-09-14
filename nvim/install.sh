@@ -172,6 +172,15 @@ cat > "$PATH_BLOCK" <<'BLOCK'
 # User-local binaries: Neovim, ripgrep, fd, ruff, basedpyright, radian,
 # tmux-srun. Placed after any conda init so ~/.local/bin wins over an older
 # system nvim (Bunya ships 0.8.0, too old for this config).
+#
+# Any existing occurrence is removed first, then it is prepended. That keeps
+# it FIRST (a stock Bunya .bashrc already adds it, but conda init then puts
+# miniconda ahead of it), and stops PATH growing each time this file is
+# re-sourced.
+PATH=":$PATH:"
+PATH="${PATH//:$HOME\/.local\/bin:/:}"
+PATH="${PATH#:}"
+PATH="${PATH%:}"
 export PATH="$HOME/.local/bin:$PATH"
 BLOCK
 RC_FOUND=0
