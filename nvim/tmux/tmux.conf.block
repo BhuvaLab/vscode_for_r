@@ -1,0 +1,131 @@
+# tmux configuration for Neovim + R/Quarto on Bunya.
+# Installed by nvim/install.sh. Edit the repo copy, not this block:
+# anything between the managed markers is overwritten on re-install.
+
+# ---------------------------------------------------------------------------
+# Prefix: C-a instead of C-b (C-b is Vim's page-up)
+# ---------------------------------------------------------------------------
+unbind C-b
+set -g prefix C-a
+bind C-a send-prefix          # press C-a twice to send a literal C-a (shell start-of-line)
+
+# ---------------------------------------------------------------------------
+# Neovim-critical settings
+# ---------------------------------------------------------------------------
+# Without this, pressing Esc in Neovim lags ~500ms before leaving insert mode.
+set -sg escape-time 0
+
+# Truecolor. Needs tmux-256color terminfo (present on Bunya; if a machine
+# lacks it, `infocmp tmux-256color` fails - fall back to screen-256color).
+set -g default-terminal "tmux-256color"
+set -ga terminal-overrides ",*256col*:RGB"
+set -ga terminal-overrides ",xterm-256color:RGB"
+
+# Let Neovim know when it gains/loses focus, so :autoread and file-change
+# detection actually fire when you switch panes.
+set -g focus-events on
+
+# OSC 52 clipboard: makes yanks inside Neovim travel through tmux and SSH to
+# your LOCAL machine's clipboard. This host has no DISPLAY, so without this a
+# yank never leaves the server.
+set -g set-clipboard on
+set -as terminal-features ',*:clipboard'
+
+# Undercurls for LSP diagnostics (squiggly red underlines under errors).
+set -as terminal-overrides ',*:Smulx=\E[4::%p1%dm'
+set -as terminal-overrides ',*:Setulc=\E[58::2::%p1%{65536}%/%d::%p1%{256}%/%{255}%&%d::%p1%{255}%&%d%;m'
+
+# ---------------------------------------------------------------------------
+# General behaviour
+# ---------------------------------------------------------------------------
+set -g mouse on
+set -g history-limit 50000
+set -g base-index 1               # windows start at 1, not 0
+setw -g pane-base-index 1
+set -g renumber-windows on        # no gaps after closing a window
+set -g display-time 2000
+set -g status-interval 5
+setw -g mode-keys vi
+setw -g automatic-rename on
+set -g set-titles on
+set -g set-titles-string "#S: #W"
+
+# ---------------------------------------------------------------------------
+# Splits and windows - open in the current pane's directory
+# ---------------------------------------------------------------------------
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+bind c new-window -c "#{pane_current_path}"
+unbind '"'
+unbind %
+
+# Resize panes with prefix + H/J/K/L (repeatable)
+bind -r H resize-pane -L 5
+bind -r J resize-pane -D 5
+bind -r K resize-pane -U 5
+bind -r L resize-pane -R 5
+
+# Quick reload
+bind r source-file ~/.tmux.conf \; display-message "tmux.conf reloaded"
+
+# ---------------------------------------------------------------------------
+# Seamless Neovim <-> tmux pane navigation (vim-tmux-navigator protocol)
+# Ctrl+h/j/k/l moves between Neovim splits AND tmux panes with the same keys.
+# Hardcoded rather than loaded via tpm so it works even if tpm is absent.
+# ---------------------------------------------------------------------------
+is_vim="ps -o state= -o comm= -t '#{pane_tty}' \
+    | grep -iqE '^[^TXZ ]+ +(\\S+\\/)?g?(view|l?n?vim?x?|fzf)(diff)?$'"
+bind-key -n 'C-h' if-shell "$is_vim" 'send-keys C-h'  'select-pane -L'
+bind-key -n 'C-j' if-shell "$is_vim" 'send-keys C-j'  'select-pane -D'
+bind-key -n 'C-k' if-shell "$is_vim" 'send-keys C-k'  'select-pane -U'
+bind-key -n 'C-l' if-shell "$is_vim" 'send-keys C-l'  'select-pane -R'
+bind-key -T copy-mode-vi 'C-h' select-pane -L
+bind-key -T copy-mode-vi 'C-j' select-pane -D
+bind-key -T copy-mode-vi 'C-k' select-pane -U
+bind-key -T copy-mode-vi 'C-l' select-pane -R
+
+# ---------------------------------------------------------------------------
+# Copy mode - vi keys, y to yank (goes to system clipboard via OSC 52)
+# ---------------------------------------------------------------------------
+bind Enter copy-mode
+bind -T copy-mode-vi v send-keys -X begin-selection
+bind -T copy-mode-vi y send-keys -X copy-pipe-and-cancel
+bind -T copy-mode-vi Escape send-keys -X cancel
+bind -T copy-mode-vi C-v send-keys -X rectangle-toggle
+
+# ---------------------------------------------------------------------------
+# Status bar - tokyonight-night palette, matches the Neovim colorscheme
+# ---------------------------------------------------------------------------
+set -g status-position bottom
+set -g status-justify left
+set -g status-style "bg=#1a1b26,fg=#c0caf5"
+
+set -g status-left-length 40
+set -g status-left "#[bg=#7aa2f7,fg=#1a1b26,bold] #S #[bg=#1a1b26,fg=#7aa2f7]"
+
+set -g status-right-length 80
+set -g status-right "#[fg=#565f89]#{?client_prefix,#[fg=#f7768e]PREFIX ,}#[fg=#565f89]%H:%M #[bg=#292e42,fg=#7aa2f7] #h "
+
+setw -g window-status-format "#[fg=#565f89] #I:#W "
+setw -g window-status-current-format "#[bg=#292e42,fg=#7dcfff,bold] #I:#W "
+
+set -g pane-border-style "fg=#292e42"
+set -g pane-active-border-style "fg=#7aa2f7"
+set -g message-style "bg=#292e42,fg=#c0caf5"
+set -g mode-style "bg=#7aa2f7,fg=#1a1b26"
+
+# ---------------------------------------------------------------------------
+# Plugins (tpm). Install/update with: prefix + I   (capital i)
+# ---------------------------------------------------------------------------
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-sensible'
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
+
+# Restore pane contents and running programs across reboots.
+set -g @resurrect-capture-pane-contents 'on'
+set -g @resurrect-strategy-nvim 'session'
+set -g @continuum-restore 'on'
+set -g @continuum-save-interval '15'
+
+run '~/.tmux/plugins/tpm/tpm'

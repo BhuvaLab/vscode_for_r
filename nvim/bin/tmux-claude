@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  tmux-claude - open a persistent tmux session on a Bunya LOGIN node and run
+#  an interactive SLURM allocation inside it, ready for Claude Code.
+#
+#  ARCHITECTURE (this ordering matters):
+#
+#      login node                     compute node
+#      +-------------------+
+#      | tmux session      |  srun --pty
+#      |   +-------------+ | ----------->  bash  ->  claude
+#      |   | your shell  | |
+#      |   +-------------+ |
+#      +-------------------+
+#
+#  tmux runs on the LOGIN node, the allocation runs INSIDE it. That way you can
+#  detach (Ctrl-a d), drop your SSH connection, and the job keeps running -
+#  reattach later and your Claude session is exactly where you left it.
+#
+#  Running tmux on the compute node instead would strand the session: compute
+#  nodes change every job and you cannot reliably SSH back to them.
+#
+#  GOTCHA: the session lives on ONE login node (bunya1..4). To reattach you
+#  must SSH back to the SAME one. This script prints which node to return to.
+#
+#  Usage:
+#     tmux-claude                      # 72h, 4 cores, 32G  (defaults)
+#     tmux-claude --time 8:00:00       # shorter allocation
+#     tmux-claude --cpus 8 --mem 64G
+#     tmux-claude --dir /scratch/project_mnt/<PROJECT>/myproj
+#     tmux-claude --name review        # a second, separate session
+#     tmux-claude --attach             # just reattach, don't allocate
+#     tmux-claude --status             # what's running right now
+# ============================================================================
+set -uo pipefail
+
+SESSION="${TMUX_CLAUDE_SESSION:-claude}"
+WALLTIME="${TMUX_CLAUDE_TIME:-72:00:00}"
+CPUS="${TMUX_CLAUDE_CPUS:-4}"
+MEM="${TMUX_CLAUDE_MEM:-32G}"
+ACCOUNT="${TMUX_CLAUDE_ACCOUNT:-a_frazer}"
+PARTITION="${TMUX_CLAUDE_PARTITION:-general}"
+# Default to personal scratch: RCC guidance is that job I/O must not land in
+# /home (50 GB quota, exceeding it risks account lockout).
+WORKDIR="${TMUX_CLAUDE_WORKDIR:-/scratch/user/$USER}"
+ATTACH_ONLY=0
+STATUS_ONLY=0
+
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t|--time)      WALLTIME="$2"; shift 2 ;;
+    -c|--cpus)      CPUS="$2"; shift 2 ;;
+    -m|--mem)       MEM="$2"; shift 2 ;;
+    -n|--name)      SESSION="$2"; shift 2 ;;
+    -d|--dir)       WORKDIR="$2"; shift 2 ;;
+    -A|--account)   ACCOUNT="$2"; shift 2 ;;
+    -p|--partition) PARTITION="$2"; shift 2 ;;
+    -a|--attach)    ATTACH_ONLY=1; shift ;;
+    -s|--status)    STATUS_ONLY=1; shift ;;
+    -h|--help)      usage ;;
+    *) echo "tmux-claude: unknown option '$1' (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+die() { echo "tmux-claude: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# --status: show sessions and jobs, then exit
+# ---------------------------------------------------------------------------
+if [ "$STATUS_ONLY" -eq 1 ]; then
+  echo "Login node : $(hostname -s)"
+  echo
+  echo "tmux sessions here:"
+  tmux ls 2>/dev/null | sed 's/^/  /' || echo "  (none on this login node)"
+  echo
+  echo "Your SLURM jobs:"
+  squeue -u "$USER" -o "  %.10i %.10j %.2t %.12L %.4C %.8m %.12R" 2>/dev/null
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Guards
+# ---------------------------------------------------------------------------
+# Already inside an allocation: nesting srun here would create a job STEP of
+# the current job, not a new 72h job - silently giving you the wrong thing.
+if [ -n "${SLURM_JOB_ID:-}" ] && [ "$ATTACH_ONLY" -eq 0 ]; then
+  die "already inside SLURM job $SLURM_JOB_ID (on $(hostname -s)).
+        Run this from a LOGIN node, not from within an allocation.
+        To reuse this allocation, just run: claude"
+fi
+
+# Nested tmux: attaching from inside tmux detaches the outer client.
+if [ -n "${TMUX:-}" ]; then
+  die "already inside tmux. Detach first (Ctrl-a d), or switch with:
+        tmux switch-client -t $SESSION"
+fi
+
+command -v tmux >/dev/null || die "tmux not found"
+
+# ---------------------------------------------------------------------------
+# Existing session -> just reattach. Never allocate a second job by accident.
+# ---------------------------------------------------------------------------
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "Reattaching to existing tmux session '$SESSION' on $(hostname -s)."
+  exec tmux attach -t "$SESSION"
+fi
+
+[ "$ATTACH_ONLY" -eq 1 ] && die "no tmux session named '$SESSION' on $(hostname -s).
+        It may be on a different login node - check with: tmux-claude --status"
+
+command -v srun >/dev/null || die "srun not found - are you on a login node?"
+[ -d "$WORKDIR" ] || die "working directory does not exist: $WORKDIR"
+
+# ---------------------------------------------------------------------------
+# Build the interactive allocation command.
+#
+# OMP/BLAS thread caps: a multithreaded BLAS reads the HOST core count (192 on
+# a general node), not your cgroup limit, and will happily spawn 192 threads
+# inside a 4-core allocation. Cap it at the allocation size.
+# ---------------------------------------------------------------------------
+SRUN_CMD="export OMP_NUM_THREADS=${CPUS} OPENBLAS_NUM_THREADS=${CPUS} MKL_NUM_THREADS=${CPUS}; \
+srun --account=${ACCOUNT} --partition=${PARTITION} \
+--nodes=1 --ntasks=1 --cpus-per-task=${CPUS} --mem=${MEM} \
+--time=${WALLTIME} --job-name=${SESSION} --pty bash -l"
+
+cat <<INFO
+Starting interactive allocation
+  session    : ${SESSION}
+  login node : $(hostname -s)   <- SSH back HERE to reattach
+  account    : ${ACCOUNT}      partition: ${PARTITION}
+  resources  : ${CPUS} cores, ${MEM}, ${WALLTIME}
+  workdir    : ${WORKDIR}
+
+Waiting for the scheduler. Once you get a shell, run:  claude
+Detach with Ctrl-a d (job keeps running).  Reattach:  tmux-claude
+INFO
+
+# Start the session running a normal login shell, then send the srun into it.
+# Deliberately NOT `tmux new-session <cmd>`: if the allocation fails or the job
+# ends, this leaves you in a shell inside tmux to see the error and retry,
+# rather than the window closing and taking the message with it.
+tmux new-session -d -s "$SESSION" -c "$WORKDIR"
+tmux send-keys -t "$SESSION" "$SRUN_CMD" Enter
+exec tmux attach -t "$SESSION"
