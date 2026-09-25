@@ -380,6 +380,38 @@ bash cplot/install.sh
 
 See [`cplot/README.md`](cplot/README.md) for how it works, usage, and keybindings.
 
+## 9) nvim: Neovim + tmux for R and Quarto
+
+If you'd rather work in the terminal than in VS Code, [`nvim/`](nvim/) installs a
+Neovim + tmux setup covering the same ground: `.qmd` and `.R` editing with a live
+R console, completion and diagnostics inside ```` ```{r} ```` chunks, and Quarto
+preview.
+
+The practical difference is persistence. The R console runs in a **tmux pane**
+rather than inside the editor, so quitting Neovim doesn't kill R and a dropped
+SSH connection leaves your data frames loaded — reattach and carry on. It also
+needs no tunnel.
+
+```bash
+bash nvim/install.sh --dry-run     # preview
+bash nvim/install.sh               # configs only
+bash nvim/install.sh --with-tools  # also fetch Neovim 0.12, ripgrep, fd, LSPs
+```
+
+Installing this changes nothing about your VS Code setup; the two are
+independent. It also ships `tmux-srun`, which holds a named Slurm allocation
+with a tmux session running inside it — detach, drop your connection, and
+rejoin later from **any** login node:
+
+```bash
+tmux-srun analysis           # 72h, 4 cores, 32 GB, ready for `claude`
+tmux-srun bigfit --cpus 8 --mem 64G --time 8:00:00
+tmux-srun analysis --end     # give the cores back when you're done
+```
+
+See [`nvim/README.md`](nvim/README.md) for keymaps, the plots-over-SSH recipe,
+and the Bunya-specific gotchas it works around.
+
 ## References
 
 - VS Code R quickstart: https://code.visualstudio.com/docs/languages/r
