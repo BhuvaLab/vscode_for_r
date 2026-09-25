@@ -18,14 +18,21 @@ Run **once**, before the first plot.
 cplot serve
 ```
 
-This writes the gallery page, opens it as a VS Code webview panel, and opens the
-live `_current.png` tab. There is no server and no port. If it reports it does not
-know the workspace path, ask the user to make one plot in an R terminal (httpgd
-writes the path), or to run `cplot config --wd <workspace folder>`.
+`cplot serve` picks the display from where the session runs:
 
-**Do not call `cplot serve` or `cplot open` again during a session.** Each call
-spawns another panel - the extension never reuses one. New versions reach the open
-panel by polling on their own. Re-open only if the gallery page itself changed.
+- **Inside herdr** (`HERDR_ENV=1`, e.g. a `herdr-srun` workbench on Bunya): it
+  splits a `cplot` pane to the right running `cplot view`, which draws plots with
+  the Kitty graphics protocol. Running `cplot serve` again is harmless - it finds
+  the pane it opened and reuses it.
+- **Otherwise (VS Code):** it writes the gallery page, opens it as a VS Code
+  webview panel, and opens the live `_current.png` tab. If it reports it does not
+  know the workspace path, ask the user to make one plot in an R terminal (httpgd
+  writes the path), or to run `cplot config --wd <workspace folder>`. **Do not
+  call `cplot serve` or `cplot open` again in VS Code** - each call spawns another
+  panel; the extension never reuses one.
+
+Either way there is no server and no port, and new versions reach the display on
+their own. `--term` / `--vscode` force one or the other.
 
 ## Plots are scoped to this session, not the project
 

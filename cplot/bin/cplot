@@ -3,11 +3,13 @@
 
 Recipes are the durable artefact; rendered PNGs are disposable versions of them.
 Display surfaces: a VS Code webview gallery (via the vscode-R request protocol)
-and a live image tab on .plots/_current.png.
+and a live image tab on .plots/_current.png; or, inside herdr, a terminal
+viewer pane drawing with the Kitty graphics protocol (`cplot view`).
 
 stdlib only, system python3, conda-independent.
 """
-import argparse, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time
+import argparse, base64, difflib, hashlib, json, os, re, select, shutil, signal, \
+       struct, subprocess, sys, tempfile, time
 from datetime import datetime
 
 SHARE      = os.path.expanduser("~/.local/share/cplot")
@@ -411,17 +413,286 @@ def gallery_file(pd):
     shutil.copyfile(os.path.join(SHARE, "gallery.html"), dst)
     return dst
 
+def use_terminal(args):
+    if getattr(args, "vscode", False): return False
+    return getattr(args, "term", False) or os.environ.get("HERDR_ENV") == "1"
+
 def cmd_serve(args):
     root = project_root(); pd = plots_dir(root)
+    if use_terminal(args):
+        build_manifest(pd)
+        open_herdr_viewer(pd, root)
+        return
     g = gallery_file(pd); build_manifest(pd)
     print(f"cplot: gallery {g}")
     if open_panel(g, title=panel_title()): print("  panel opened in VS Code (no server, no port)")
     open_live_tab(pd)
 
 def cmd_open(args):
-    pd = plots_dir()
+    root = project_root(); pd = plots_dir(root)
+    if use_terminal(args):
+        build_manifest(pd)
+        open_herdr_viewer(pd, root)
+        return
     g = gallery_file(pd); build_manifest(pd)
     print("panel opened" if open_panel(g, title=panel_title()) else g)
+
+# ---------------------------------------------------------------- herdr viewer pane
+# Inside herdr, the display surface is a sibling pane running `cplot view --dir`.
+# Unlike a VS Code webview, a pane can be found again, so serve/open are
+# idempotent here: the pane id is remembered per session and reused while alive.
+
+def herdr_bin():
+    return os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
+
+def herdr_json(*argv):
+    h = herdr_bin()
+    if not h: return None
+    r = subprocess.run([h, *argv], capture_output=True, text=True)
+    try: return json.loads(r.stdout)
+    except Exception: return None
+
+def open_herdr_viewer(pd, root):
+    h = herdr_bin()
+    if not h or not os.environ.get("HERDR_PANE_ID"):
+        print("cplot: not inside a herdr pane - run the viewer yourself in a pane\n"
+              f"  of a Kitty-graphics terminal:  cplot view --dir {pd}")
+        return False
+    vf = os.path.join(pd, "_viewer.json")
+    info = load(vf, {})
+    pid = info.get("pane_id")
+    if pid:
+        got = herdr_json("pane", "get", pid)
+        if got and "result" in got:
+            print(f"cplot: viewer already open in herdr pane {pid}")
+            return True
+    got = herdr_json("pane", "split", "--current", "--direction", "right",
+                     "--ratio", "0.55", "--cwd", root, "--no-focus")
+    try:
+        pid = got["result"]["pane"]["pane_id"]
+    except Exception:
+        die(f"herdr pane split failed: {got}")
+    me = os.path.realpath(sys.argv[0])
+    subprocess.run([h, "pane", "run", pid, f"exec {sh_quote(me)} view --dir {sh_quote(pd)}"],
+                   capture_output=True)
+    subprocess.run([h, "pane", "rename", pid, "cplot"], capture_output=True)
+    save(vf, {"pane_id": pid, "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+    print(f"cplot: viewer opened in herdr pane {pid} (Kitty graphics, no server, no port)")
+    return True
+
+def sh_quote(s):
+    return "'" + s.replace("'", "'\\''") + "'"
+
+# ---------------------------------------------------------------- terminal viewer
+# Draws PNGs with the Kitty graphics protocol, written by hand so nothing beyond
+# system python3 is needed on the compute node. Images travel inside the
+# terminal byte stream, so they follow any ssh/srun/herdr hop the text does.
+
+def png_size(path):
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if head[:8] != b"\x89PNG\r\n\x1a\n": return None
+    return struct.unpack(">II", head[16:24])
+
+def kitty_image(path, cols, rows):
+    data = base64.b64encode(open(path, "rb").read())
+    out, first = [], True
+    for i in range(0, len(data), 4096):
+        chunk = data[i:i + 4096]
+        more = 1 if i + 4096 < len(data) else 0
+        keys = f"a=T,f=100,q=2,C=1,c={cols},r={rows},m={more}" if first else f"m={more}"
+        out.append(b"\x1b_G" + keys.encode() + b";" + chunk + b"\x1b\\")
+        first = False
+    return b"".join(out)
+
+KITTY_CLEAR = b"\x1b_Ga=d,d=A,q=2\x1b\\"
+
+class Term:
+    def __init__(self):
+        import termios, tty
+        self.termios, self.fd = termios, sys.stdin.fileno()
+        self.saved = termios.tcgetattr(self.fd)
+        tty.setraw(self.fd)
+        self.w(b"\x1b[?1049h\x1b[?25l")
+
+    def close(self):
+        self.w(KITTY_CLEAR + b"\x1b[?25h\x1b[?1049l")
+        self.termios.tcsetattr(self.fd, self.termios.TCSADRAIN, self.saved)
+
+    def w(self, b):
+        os.write(sys.stdout.fileno(), b if isinstance(b, bytes) else b.encode())
+
+    def read(self, timeout):
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        return os.read(self.fd, 4096) if r else b""
+
+    def query(self, q, until, timeout=0.5):
+        self.w(q)
+        buf, end = b"", time.time() + timeout
+        while time.time() < end and not re.search(until, buf):
+            buf += self.read(max(0.0, end - time.time()))
+        return buf
+
+    def size(self):
+        import fcntl, termios
+        rows, cols, xp, yp = struct.unpack("HHHH", fcntl.ioctl(
+            sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8))
+        return cols, rows, xp, yp
+
+    def kitty_supported(self):
+        # Graphics query, then primary DA: a terminal that ignores the query
+        # still answers DA, so we never wait out the full timeout.
+        buf = self.query(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c", rb"\x1b\[\?[\d;]*c")
+        return b"_Gi=31;OK" in buf
+
+    def cell_px(self):
+        if getattr(self, "_cell", None): return self._cell
+        self._cell = self._measure_cell()
+        return self._cell
+
+    def _measure_cell(self):
+        cols, rows, xp, yp = self.size()
+        if xp and yp: return xp / cols, yp / rows
+        m = re.search(rb"\x1b\[6;(\d+);(\d+)t", self.query(b"\x1b[16t", rb"\x1b\[6;\d+;\d+t", 0.3))
+        if m: return int(m.group(2)), int(m.group(1))
+        return 10.0, 21.0
+
+def fit_cells(img_w, img_h, cols, rows, cw, ch):
+    c = cols
+    r = max(1, round(c * cw * img_h / img_w / ch))
+    if r > rows:
+        r = rows
+        c = max(1, round(r * ch * img_w / img_h / cw))
+    return min(c, cols), r
+
+def trunc(s, n):
+    return s if len(s) <= n else s[:max(0, n - 1)] + "…"
+
+class Viewer:
+    KEYS = {b"\x1b[C": "right", b"\x1b[D": "left", b"\x1b[A": "up", b"\x1b[B": "down",
+            b"\x1bOC": "right", b"\x1bOD": "left", b"\x1bOA": "up", b"\x1bOB": "down",
+            b"l": "right", b"h": "left", b"k": "up", b"j": "down"}
+
+    def __init__(self, pd, mode):
+        self.pd, self.mode = pd, mode
+        self.plots, self.pi, self.vi = [], 0, -1
+        self.code, self.scroll, self.mtime = False, 0, None
+        self.dirty = True
+
+    def reload(self):
+        mf = os.path.join(self.pd, "_manifest.json")
+        try: mt = os.stat(mf).st_mtime_ns
+        except FileNotFoundError: mt = None
+        if mt == self.mtime: return
+        self.mtime = mt
+        old = {p["name"]: len(p["versions"]) for p in self.plots}
+        cur = self.plots[self.pi]["name"] if self.plots else None
+        self.plots = load(mf, {}).get("plots", [])
+        grew = [i for i, p in enumerate(self.plots) if len(p["versions"]) > old.get(p["name"], 0)]
+        if grew and old:
+            self.pi, self.vi, self.code = grew[0], -1, False   # follow the newest render
+        else:
+            names = [p["name"] for p in self.plots]
+            self.pi = names.index(cur) if cur in names else 0
+            if self.plots and self.vi >= len(self.plots[self.pi]["versions"]): self.vi = -1
+        self.dirty = True
+
+    def key(self, k):
+        if not self.plots: return
+        n = len(self.plots[self.pi]["versions"])
+        vi = self.vi % n
+        if self.code and k in ("up", "down"):
+            self.scroll = max(0, self.scroll + (1 if k == "down" else -1) * 5)
+        elif k == "right": self.pi, self.vi, self.scroll = (self.pi + 1) % len(self.plots), -1, 0
+        elif k == "left":  self.pi, self.vi, self.scroll = (self.pi - 1) % len(self.plots), -1, 0
+        elif k == "up":    self.vi = max(0, vi - 1)
+        elif k == "down":  self.vi = min(n - 1, vi + 1)
+        else: return
+        self.dirty = True
+
+    def draw(self, t):
+        cols, rows, _, _ = t.size()
+        out = [KITTY_CLEAR, b"\x1b[2J\x1b[H"]
+        if not self.plots:
+            out.append(b"\x1b[2mcplot: no plots yet in this session - `cplot run <name>`\x1b[0m")
+            t.w(b"".join(out)); return
+        p = self.plots[self.pi]; vs = p["versions"]; v = vs[self.vi % len(vs)]
+        vn = self.vi % len(vs) + 1
+        fail = "  \x1b[31mlast run FAILED\x1b[0m" if p.get("failed") else ""
+        head = (f"\x1b[1m{p['name']}\x1b[0m  v{v['v']:03d} ({vn}/{len(vs)})"
+                f"  \x1b[2m[{self.pi + 1}/{len(self.plots)}] {v.get('ts', '')}\x1b[0m{fail}")
+        out.append(head.encode())
+        foot = f"←→ plot  ↑↓ version  c code  z zoom  r redraw  q quit  [{self.mode}]"
+        cap = v.get("title") or ""
+        if v.get("caption"): cap += (" — " if cap else "") + v["caption"]
+        body = rows - 3
+        if self.code:
+            self.draw_code(out, p, vs, cols, body)
+        else:
+            png = os.path.join(self.pd, v["png"])
+            dims = png_size(png) if os.path.exists(png) else None
+            if dims and self.mode == "kitty":
+                cw, ch = t.cell_px()
+                c, r = fit_cells(dims[0], dims[1], cols, body, cw, ch)
+                out.append(f"\x1b[2;{max(1, (cols - c) // 2 + 1)}H".encode())
+                out.append(kitty_image(png, c, r))
+            elif dims and self.mode == "chafa":
+                r = subprocess.run(["chafa", "-s", f"{cols}x{body}", png], capture_output=True)
+                out.append(b"\x1b[2;1H" + r.stdout.replace(b"\n", b"\r\n"))
+            else:
+                out.append(f"\x1b[3;1H(no inline graphics here)\r\n{png}".encode())
+        out.append(f"\x1b[{rows - 1};1H{trunc(cap, cols)}".encode())
+        out.append(f"\x1b[{rows};1H\x1b[2m{trunc(foot, cols)}\x1b[0m".encode())
+        t.w(b"".join(out))
+
+    def draw_code(self, out, p, vs, cols, body):
+        i = self.vi % len(vs)
+        now = vs[i].get("code", "").splitlines()
+        if i > 0:
+            prev = vs[i - 1].get("code", "").splitlines()
+            lines = list(difflib.unified_diff(prev, now, f"v{vs[i-1]['v']:03d}",
+                                              f"v{vs[i]['v']:03d}", lineterm="", n=99))[2:] or now
+        else:
+            lines = now
+        self.scroll = min(self.scroll, max(0, len(lines) - body))
+        out.append(b"\x1b[2;1H")
+        for ln in lines[self.scroll:self.scroll + body]:
+            col = "\x1b[32m" if ln.startswith("+") else "\x1b[31m" if ln.startswith("-") \
+                  else "\x1b[36m" if ln.startswith("@@") else ""
+            out.append(f"{col}{trunc(ln, cols)}\x1b[0m\r\n".encode())
+
+def cmd_view(args):
+    pd = os.path.abspath(args.dir) if args.dir else plots_dir()
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        die("cplot view needs an interactive terminal")
+    t = Term()
+    winch = [False]
+    signal.signal(signal.SIGWINCH, lambda *_: winch.__setitem__(0, True))
+    try:
+        mode = args.mode
+        if mode == "auto":
+            mode = "kitty" if t.kitty_supported() else ("chafa" if shutil.which("chafa") else "text")
+        v = Viewer(pd, mode)
+        while True:
+            if not os.path.isdir(pd):
+                break   # session swept: its plots are gone, so is the viewer
+            v.reload()
+            if winch[0]: winch[0], v.dirty, t._cell = False, True, None
+            if v.dirty: v.draw(t); v.dirty = False
+            b = t.read(0.75)
+            if not b: continue
+            if b in (b"q", b"\x03"): break
+            if b == b"c": v.code, v.scroll, v.dirty = not v.code, 0, True
+            elif b == b"r": v.dirty = True
+            elif b == b"z" and herdr_bin() and os.environ.get("HERDR_PANE_ID"):
+                subprocess.run([herdr_bin(), "pane", "zoom", "--pane", os.environ["HERDR_PANE_ID"], "--toggle"],
+                               capture_output=True)
+            else:
+                v.key(Viewer.KEYS.get(b, ""))
+    finally:
+        t.close()
+    if not os.path.isdir(pd):
+        print("cplot: this session's plots are gone (session ended) - viewer closed")
 
 def cmd_clear(args):
     pd = plots_dir()
@@ -510,7 +781,11 @@ def cmd_status(args):
     print(f"gallery    {os.path.join(pd, '_gallery.html')}")
     print(f"vscode wd  {discover_wd() or '(unknown)'}")
     print(f"plots      {len(plot_names(pd))}")
-    print(f"transport  local-file webview (no server, no port)")
+    if os.environ.get("HERDR_ENV") == "1":
+        pane = load(os.path.join(pd, "_viewer.json"), {}).get("pane_id", "(not open)")
+        print(f"transport  herdr pane {pane}, Kitty graphics (no server, no port)")
+    else:
+        print(f"transport  local-file webview (no server, no port)")
     others = [d for d in (os.listdir(cache_root) if os.path.isdir(cache_root) else [])
               if d != session_id() and not d.startswith(".")]
     if others:
@@ -533,8 +808,16 @@ def main():
     p.add_argument("--title"); p.add_argument("--caption")
     p.add_argument("--keep", type=int); p.set_defaults(fn=cmd_run)
 
-    p = sub.add_parser("serve"); p.set_defaults(fn=cmd_serve)
-    p = sub.add_parser("open");  p.set_defaults(fn=cmd_open)
+    for c, fn in (("serve", cmd_serve), ("open", cmd_open)):
+        p = sub.add_parser(c)
+        g = p.add_mutually_exclusive_group()
+        g.add_argument("--term", action="store_true", help="herdr viewer pane (default inside herdr)")
+        g.add_argument("--vscode", action="store_true", help="VS Code webview panel")
+        p.set_defaults(fn=fn)
+    p = sub.add_parser("view", help="terminal viewer (Kitty graphics); serve --term runs it in a herdr pane")
+    p.add_argument("--dir", help="plots directory to follow (default: this session's)")
+    p.add_argument("--mode", choices=["auto", "kitty", "chafa", "text"], default="auto")
+    p.set_defaults(fn=cmd_view)
     p = sub.add_parser("list");  p.set_defaults(fn=cmd_list)
     p = sub.add_parser("log");   p.add_argument("name"); p.set_defaults(fn=cmd_log)
     p = sub.add_parser("show");  p.add_argument("name"); p.add_argument("version", nargs="?")
