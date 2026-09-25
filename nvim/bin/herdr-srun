@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  herdr-srun - a named, persistent herdr workbench on a Bunya compute node
+#  that you can rejoin from ANY login node, on any machine, and that survives
+#  a dropped connection. The herdr counterpart of tmux-srun (kept as fallback).
+#
+#  ARCHITECTURE
+#
+#      any login node                 compute node (one sbatch job)
+#      +-------------------+          +----------------------------------+
+#      | herdr-srun <name> |  srun    | batch step:  herdr server        |
+#      |                   | -------> |   owns every pane: claude, R ... |
+#      +-------------------+ --overlap| attach step: herdr client (UI)   |
+#                                     +----------------------------------+
+#
+#  The herdr SERVER runs in the job's BATCH step. Attaching is a separate
+#  job step that runs only `herdr client`. This split is the whole point:
+#  SLURM SIGKILLs everything in a job step when that step ends, and an attach
+#  step ends whenever your SSH connection drops. Anything started from the
+#  attach step dies with it - which is exactly how tmux-srun used to lose
+#  every Claude session on disconnect (fixed there too, 2026-09-25).
+#
+#  Sockets are per job, in node-local /tmp (HERDR_SOCKET_PATH). herdr's
+#  default is ~/.config/herdr/herdr.sock, which is on the shared home: a
+#  `herdr` on a login node would find it, fail to connect, and could start a
+#  second server there.
+#
+#  State is per workbench NAME (HERDR_SESSION=<name>), under
+#  ~/.config/herdr/sessions/<name>/. When the job ends - walltime or --end -
+#  starting the same name again restores its layout and resumes each Claude
+#  pane into its previous conversation (resume_agents_on_restore, plus
+#  `herdr integration install claude`). Ordinary commands start fresh.
+#
+#  THE COST: the job holds its cores for the full walltime whether you use
+#  them or not. Keep it small (4 cores / 32G default) and end it when done:
+#
+#      herdr-srun <name> --end
+#
+#  Real compute still belongs in its own sbatch job, not in here.
+#
+#  Usage:
+#     herdr-srun <name>                     # 72h, 4 cores, 32G  (defaults)
+#     herdr-srun analysis --time 8:00:00    # shorter allocation
+#     herdr-srun bigmem --cpus 8 --mem 64G
+#     herdr-srun proj --dir /scratch/project_mnt/<PROJECT>/work
+#     herdr-srun analysis --attach          # reattach only, never allocate
+#     herdr-srun analysis --end             # cancel the job, free the cores
+#     herdr-srun --status                   # what's running right now
+#
+#  Inside: mouse works everywhere; prefix is ctrl+a (~/.config/herdr/
+#  config.toml), prefix+? lists keys, prefix+q detaches.
+#
+#  The name is also the SLURM job name and the herdr session name, so it must
+#  be unique among your jobs and use only letters, digits, '.', '_' and '-'.
+# ============================================================================
+set -uo pipefail
+
+SESSION=""
+WALLTIME="${HERDR_SRUN_TIME:-72:00:00}"
+CPUS="${HERDR_SRUN_CPUS:-4}"
+MEM="${HERDR_SRUN_MEM:-32G}"
+ACCOUNT="${HERDR_SRUN_ACCOUNT:-a_frazer}"
+PARTITION="${HERDR_SRUN_PARTITION:-general}"
+# Personal scratch, not /home (50 GB quota; exceeding it risks lockout).
+WORKDIR="${HERDR_SRUN_WORKDIR:-/scratch/user/$USER}"
+# How long to wait for a PENDING job before telling you to come back later.
+# The job is NOT cancelled on timeout - it stays queued.
+WAIT_SECS="${HERDR_SRUN_WAIT:-600}"
+HERDR="${HERDR_BIN:-$HOME/.local/bin/herdr}"
+ATTACH_ONLY=0
+STATUS_ONLY=0
+END_ONLY=0
+EXPLICIT_RES=""
+
+usage() { sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { echo "herdr-srun: $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t|--time)      WALLTIME="$2"; EXPLICIT_RES="$EXPLICIT_RES time=$2"; shift 2 ;;
+    -c|--cpus)      CPUS="$2";     EXPLICIT_RES="$EXPLICIT_RES cpus=$2"; shift 2 ;;
+    -m|--mem)       MEM="$2";      EXPLICIT_RES="$EXPLICIT_RES mem=$2";  shift 2 ;;
+    -d|--dir)       WORKDIR="$2"; shift 2 ;;
+    -A|--account)   ACCOUNT="$2"; shift 2 ;;
+    -p|--partition) PARTITION="$2"; shift 2 ;;
+    -a|--attach)    ATTACH_ONLY=1; shift ;;
+    -s|--status)    STATUS_ONLY=1; shift ;;
+    -e|--end)       END_ONLY=1; shift ;;
+    -h|--help)      usage; exit 0 ;;
+    -*) echo "herdr-srun: unknown option '$1' (try --help)" >&2; exit 2 ;;
+    *)
+      [ -n "$SESSION" ] && die "name given twice ('$SESSION', '$1')"
+      SESSION="$1"; shift ;;
+  esac
+done
+
+# Scheduler queries: the same answer from every login node.
+jobid_for() {
+  squeue -u "$USER" -h -n "$1" -o "%i %T" 2>/dev/null \
+    | awk '$2=="RUNNING"{print $1}' | tail -1
+}
+jobid_any() {
+  squeue -u "$USER" -h -n "$1" -o "%i" 2>/dev/null | tail -1
+}
+state_of() { squeue -j "$1" -h -o "%T" 2>/dev/null; }
+
+# herdr_env: the environment server and client must agree on. Emitted as
+# shell code; $SLURM_JOB_ID is left for the node to expand.
+herdr_env() {
+  cat <<EOF
+export HERDR_SESSION='$SESSION'
+export HERDR_SOCKET_PATH="/tmp/herdr-\$USER-\$SLURM_JOB_ID.sock"
+EOF
+}
+
+# serve_cmd: the batch payload. Restarts the server if it ever exits, so the
+# job keeps its panes restorable instead of idling with nothing to attach to;
+# --end is how you stop it. The thread caps belong here because panes inherit
+# the SERVER's environment, and a multithreaded BLAS otherwise reads the host
+# core count (192 on a general node), not the cgroup limit.
+serve_cmd() {
+  herdr_env
+  cat <<EOF
+export OMP_NUM_THREADS=$CPUS OPENBLAS_NUM_THREADS=$CPUS MKL_NUM_THREADS=$CPUS
+cd '$WORKDIR'
+while :; do
+  '$HERDR' server
+  echo "herdr-srun: herdr server exited (\$?) at \$(date); restarting in 5s" >&2
+  sleep 5
+done
+EOF
+}
+
+# join_cmd: run ON THE NODE. Waits for the batch step's server, then attaches
+# with `herdr client`, which only connects - never plain `herdr`, which would
+# start a server inside this attach step if it found none.
+join_cmd() {
+  herdr_env
+  cat <<EOF
+i=0
+until [ -S "\$HERDR_SOCKET_PATH" ]; do
+  i=\$((i+1))
+  [ \$i -gt 30 ] && { echo "herdr-srun: no herdr server socket after 30s (\$HERDR_SOCKET_PATH)" >&2; exit 1; }
+  sleep 1
+done
+cd '$WORKDIR'   # herdr opens a new workspace in the CLIENT's directory
+exec '$HERDR' client
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# --status
+# ---------------------------------------------------------------------------
+if [ "$STATUS_ONLY" -eq 1 ]; then
+  echo "This host  : $(hostname -s)"
+  echo
+  echo "Your SLURM jobs (workbenches appear by name):"
+  squeue -u "$USER" -o "  %.10i %.14j %.2t %.12L %.4C %.8m %.14R" 2>/dev/null
+  echo
+  echo "Reattach any RUNNING one with:  herdr-srun <name>"
+  exit 0
+fi
+
+if [ -z "$SESSION" ]; then
+  echo "herdr-srun: a workbench name is required." >&2
+  echo >&2
+  echo "  herdr-srun <name>        e.g. herdr-srun analysis" >&2
+  echo "  herdr-srun --status      list running workbenches and jobs" >&2
+  echo "  herdr-srun --help        full usage" >&2
+  exit 2
+fi
+
+case "$SESSION" in
+  default|.|..) die "'$SESSION' is reserved by herdr - pick another name" ;;
+  *[!A-Za-z0-9._-]*) die "name may only contain letters, digits, '.', '_' and '-'" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# --end
+# ---------------------------------------------------------------------------
+if [ "$END_ONLY" -eq 1 ]; then
+  JID=$(jobid_any "$SESSION")
+  [ -z "$JID" ] && die "no job named '$SESSION' in the queue."
+  echo "Cancelling job $JID ('$SESSION'). Running commands die with it; the"
+  echo "layout and Claude conversations are restored next time you start '$SESSION'."
+  scancel "$JID" && echo "done."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Guards
+# ---------------------------------------------------------------------------
+[ "${HERDR_ENV:-}" = 1 ] && die "already inside herdr (herdr blocks nested
+        clients). Detach first with the prefix then q."
+
+[ -x "$HERDR" ] || die "herdr not found at $HERDR (install: curl -fsSL https://herdr.dev/install.sh | sh)"
+command -v squeue >/dev/null || die "squeue not found - is SLURM on PATH?"
+
+# Already inside the workbench job: the server is local, attach directly.
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+  if [ "$(squeue -j "$SLURM_JOB_ID" -h -o '%j' 2>/dev/null)" = "$SESSION" ]; then
+    echo "Already inside job $SLURM_JOB_ID on $(hostname -s); attaching locally."
+    exec bash -c "$(join_cmd)"
+  fi
+  die "already inside SLURM job $SLURM_JOB_ID (on $(hostname -s)), which is not
+        '$SESSION'. Run this from a login node."
+fi
+
+# ---------------------------------------------------------------------------
+# attach_to <jobid>: a job step that runs only the herdr client.
+# --overlap: share the resources the batch step holds, or block forever.
+# --cpu-bind=none: don't inherit a stale bind mask from another allocation.
+# --mem=256M: the step is just the UI; without a cap it claims the job's whole
+#   memory and a second attach (laptop AND desktop) is refused.
+# ---------------------------------------------------------------------------
+attach_to() {
+  local jid="$1" node
+  node=$(squeue -j "$jid" -h -o "%N" 2>/dev/null)
+  echo "Attaching to '$SESSION' (job $jid on ${node:-?}) - detach with ctrl+a then q."
+  exec srun --overlap --jobid="$jid" --cpu-bind=none --mem=256M --export=ALL --pty \
+       bash -c "$(join_cmd)"
+}
+
+wait_running() {
+  local jid="$1" waited=0 st
+  while :; do
+    st=$(state_of "$jid")
+    [ "$st" = "RUNNING" ] && return 0
+    if [ -z "$st" ]; then
+      echo >&2; die "job $jid left the queue before starting (check: sacct -j $jid)"
+    fi
+    if [ "$waited" -ge "$WAIT_SECS" ]; then
+      echo >&2
+      echo "herdr-srun: job $jid is still $st after ${WAIT_SECS}s. It is STILL QUEUED -" >&2
+      echo "            nothing was cancelled. Reattach when it starts with:" >&2
+      echo "              herdr-srun $SESSION" >&2
+      exit 0
+    fi
+    [ "$waited" -eq 0 ] && printf "Waiting for job %s to start (%s)" "$jid" "$st"
+    printf "."
+    sleep 5; waited=$((waited + 5))
+  done
+}
+
+# Existing job -> rejoin it. Never allocate a second one by accident.
+JID=$(jobid_for "$SESSION")
+if [ -n "$JID" ]; then
+  if [ -n "$EXPLICIT_RES" ]; then
+    echo "herdr-srun: '$SESSION' is already running as job $JID;" >&2
+    echo "            ignoring requested${EXPLICIT_RES} - a running allocation cannot be resized." >&2
+    echo "            For different resources: herdr-srun $SESSION --end, then start it again." >&2
+    echo >&2
+  fi
+  attach_to "$JID"
+fi
+
+JID=$(jobid_any "$SESSION")
+if [ -n "$JID" ]; then
+  echo "'$SESSION' is queued as job $JID ($(state_of "$JID"))."
+  wait_running "$JID"; echo
+  attach_to "$JID"
+fi
+
+[ "$ATTACH_ONLY" -eq 1 ] && die "no job named '$SESSION' in the queue.
+        Check what you have with: herdr-srun --status"
+
+command -v sbatch >/dev/null || die "sbatch not found - are you on a login node?"
+[ -d "$WORKDIR" ] || die "working directory does not exist: $WORKDIR"
+
+# Job output goes to personal scratch, never /home.
+LOGDIR="/scratch/user/$USER/.herdr-srun"
+mkdir -p "$LOGDIR" 2>/dev/null || LOGDIR="/scratch/user/$USER"
+
+cat <<INFO
+Submitting herdr workbench
+  name       : ${SESSION}
+  account    : ${ACCOUNT}      partition: ${PARTITION}
+  resources  : ${CPUS} cores, ${MEM}, ${WALLTIME}
+  workdir    : ${WORKDIR}
+
+Rejoin from ANY login node with:  herdr-srun ${SESSION}
+End it (frees the cores) with:    herdr-srun ${SESSION} --end
+INFO
+
+JID=$(sbatch --parsable \
+  --job-name="${SESSION}" --account="${ACCOUNT}" --partition="${PARTITION}" \
+  --nodes=1 --ntasks=1 --cpus-per-task="${CPUS}" --mem="${MEM}" \
+  --time="${WALLTIME}" --chdir="${WORKDIR}" \
+  -o "${LOGDIR}/${SESSION}-%j.out" -e "${LOGDIR}/${SESSION}-%j.out" \
+  --wrap="$(serve_cmd)") || die "sbatch failed"
+
+echo "submitted job ${JID}"
+wait_running "$JID"; echo
+attach_to "$JID"

@@ -23,12 +23,14 @@ Usage: $SCRIPT_NAME [--with-tools] [--dry-run]
 Installs the Neovim + tmux setup for R/Quarto:
   ~/.config/nvim/                     Neovim config (lazy.nvim, R.nvim, Quarto, LSP)
   ~/.tmux.conf                        managed block (prefix C-a, Neovim-safe settings)
-  ~/.local/bin/tmux-srun              persistent Slurm workbench launcher
+  ~/.local/bin/tmux-srun              persistent Slurm workbench launcher (tmux)
+  ~/.local/bin/herdr-srun             persistent Slurm workbench launcher (herdr)
+  ~/.config/herdr/config.toml         herdr config, only if you have none
   ~/.bashrc / ~/.zshrc                managed block adding ~/.local/bin to PATH
 
 Options:
   --with-tools   Also download the binary toolchain (Neovim $NVIM_VERSION, ripgrep,
-                 fd, tree-sitter CLI) and build the Python LSP venv. Roughly
+                 fd, tree-sitter CLI, herdr) and build the Python LSP venv. Roughly
                  450 MB. Without this flag the installer only REPORTS what is
                  missing.
   --dry-run, -n  Preview actions without writing files.
@@ -145,11 +147,30 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. tmux-srun launcher
+# 3. Slurm workbench launchers
 # ---------------------------------------------------------------------------
 log ""
-log "== Slurm launcher =="
+log "== Slurm launchers =="
 install_file "$NVIM_ROOT/bin/tmux-srun" "$HOME/.local/bin/tmux-srun" 1
+install_file "$NVIM_ROOT/bin/herdr-srun" "$HOME/.local/bin/herdr-srun" 1
+
+# herdr config: a starting point only. Unlike the managed blocks there is no
+# marker syntax to merge into, so an existing config is left untouched.
+HERDR_CFG="$HOME/.config/herdr/config.toml"
+if [[ -f "$HERDR_CFG" ]]; then
+  cmp -s "$HERDR_CFG" "$NVIM_ROOT/herdr/config.toml" \
+    && log "unchanged: $HERDR_CFG" \
+    || log "kept existing: $HERDR_CFG (template: nvim/herdr/config.toml)"
+else
+  install_file "$NVIM_ROOT/herdr/config.toml" "$HERDR_CFG"
+fi
+
+# Claude session restore needs herdr's Claude integration. It edits
+# ~/.claude/settings.json, so it is suggested rather than done here.
+if command -v herdr >/dev/null && command -v claude >/dev/null \
+   && ! grep -q herdr-agent-state "$HOME/.claude/settings.json" 2>/dev/null; then
+  log "-> for Claude session restore in herdr-srun, run once:  herdr integration install claude"
+fi
 
 # Migration: this launcher used to be called tmux-claude. Remove the old copy
 # so an upgraded install does not leave two diverging scripts on PATH.
@@ -222,6 +243,7 @@ command -v basedpyright >/dev/null || MISSING+=("basedpyright")
 command -v ruff         >/dev/null || MISSING+=("ruff")
 command -v radian       >/dev/null || MISSING+=("radian")
 command -v tmux         >/dev/null || MISSING+=("tmux (ask your sysadmin; on Bunya it is preinstalled)")
+command -v herdr        >/dev/null || MISSING+=("herdr (for herdr-srun)")
 
 if (( ! WITH_TOOLS )); then
   if (( ${#MISSING[@]} )); then
@@ -236,7 +258,7 @@ else
   BIN="$HOME/.local/bin"
   SRC="$HOME/.local/src"
   if (( DRY_RUN )); then
-    log "[dry-run] would download Neovim $NVIM_VERSION, ripgrep, fd, tree-sitter $TREE_SITTER_VERSION"
+    log "[dry-run] would download Neovim $NVIM_VERSION, ripgrep, fd, tree-sitter $TREE_SITTER_VERSION, herdr"
     log "[dry-run] would create the Python LSP venv at ~/.local/share/nvim-tools"
   else
     mkdir -p "$BIN" "$SRC"
@@ -285,6 +307,15 @@ else
       gunzip -f "$SRC/ts.gz"
       mv "$SRC/ts" "$BIN/tree-sitter"; chmod +x "$BIN/tree-sitter"
       log "installed: $BIN/tree-sitter"
+    fi
+
+    # herdr ships a static binary, so the glibc 2.34 caveat above does not
+    # apply. Its own installer picks the platform build and puts it in $BIN.
+    if ! command -v herdr >/dev/null; then
+      log "installing herdr..."
+      curl -fsSL https://herdr.dev/install.sh | HERDR_INSTALL_DIR="$BIN" sh >/dev/null \
+        && log "installed: $BIN/herdr ($("$BIN/herdr" --version))" \
+        || warn "herdr install failed (only herdr-srun needs it)"
     fi
 
     # Python LSP tools in their own venv so they never pollute an analysis env.

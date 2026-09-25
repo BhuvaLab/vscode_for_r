@@ -18,6 +18,7 @@ independent: installing this changes nothing about your VS Code setup.
 - **Python**: basedpyright + ruff, following whichever conda env is active
 - **tmux** preconfigured with the settings Neovim needs (see below) and `Ctrl-a` prefix
 - **`tmux-srun`** — one command for a named, persistent Slurm allocation with tmux inside it, rejoinable from any login node, for Claude Code or anything else
+- **`herdr-srun`** — the same allocation with [herdr](https://herdr.dev) instead of tmux: an agent-aware multiplexer for running several Claude Code sessions at once, which also restores them when the job ends
 
 ## Install
 
@@ -35,7 +36,9 @@ That installs:
 |---|---|
 | `~/.config/nvim/` | the Neovim config (13 Lua files + `CHEATSHEET.md`) |
 | `~/.tmux.conf` | a **managed block** — your existing tmux settings are preserved |
-| `~/.local/bin/tmux-srun` | the Slurm session launcher |
+| `~/.local/bin/tmux-srun` | the Slurm session launcher (tmux) |
+| `~/.local/bin/herdr-srun` | the Slurm session launcher (herdr) |
+| `~/.config/herdr/config.toml` | herdr config — only if you don't have one |
 | `~/.bashrc`, `~/.zshrc` | a managed block putting `~/.local/bin` first on `PATH` |
 
 It then **reports** which command-line tools are missing. To fetch them:
@@ -44,7 +47,7 @@ It then **reports** which command-line tools are missing. To fetch them:
 bash nvim/install.sh --with-tools
 ```
 
-That downloads Neovim 0.12.5, ripgrep, fd, the tree-sitter CLI, and builds an
+That downloads Neovim 0.12.5, ripgrep, fd, the tree-sitter CLI, herdr, and builds an
 isolated venv for basedpyright / ruff / radian — about 450 MB, all under
 `~/.local`, no sudo. Re-running any of this is safe: unchanged files are left
 alone and the managed blocks are replaced in place, not appended twice.
@@ -105,18 +108,29 @@ tmux-srun --status                # what's running (no name needed)
 reattaching to a live session prints a warning and reattaches unchanged — end
 that job first (`tmux-srun <name> --end`) or use a different session name.
 
-The job is submitted with `sbatch` and holds the node with `sleep infinity`.
-tmux runs **inside that job, on the compute node**:
+The job is submitted with `sbatch`, and its **batch step starts and owns the
+tmux server** on the compute node. Attaching is a separate job step that runs
+only a tmux client:
 
 ```
-any login node                 compute node
-+-------------------+
-| your shell        |  srun --overlap --jobid=N
-|                   | ----------->  tmux session
-|                   |                 +------------------------+
-+-------------------+                 | bash -> claude, R, ... |
-                                      +------------------------+
+any login node                 compute node (one sbatch job)
++-------------------+          +--------------------------------------+
+| tmux-srun <name>  |  srun    | batch step:  tmux server             |
+|                   | -------> |   bash -> claude, R, ...             |
++-------------------+ --overlap| attach step: tmux client (your view) |
+                               +--------------------------------------+
 ```
+
+**Why the server must be in the batch step.** Slurm SIGKILLs every process in
+a job step when that step ends, and an attach step ends whenever your SSH
+connection drops. Earlier versions attached with `srun --pty tmux new-session
+-A`, so the *first* attach created the tmux server inside its own step — and a
+dropped connection killed the server and every Claude session in it (`sacct`
+shows it as the attach step `CANCELLED` with exit `0:9`). Now only the client
+dies; reattach and everything is still running. Each job gets its own tmux
+socket (`tmux -L ws-<jobid>`), since `/tmp` is shared by every job on a node.
+Jobs started by an older `tmux-srun` still attach, with a warning that they
+lack the fix.
 
 **Reattaching works from any login node**, and from any machine: `tmux-srun
 <name>` asks the scheduler where the job is and routes a new job step to it.
@@ -129,7 +143,7 @@ Detach with `Ctrl-a d`, drop your connection, reconnect later and the job is
 still running. Because the allocation is no longer a child of a terminal,
 losing the login node no longer takes the job with it.
 
-**The cost:** `sleep infinity` holds the cores for the full walltime whether
+**The cost:** the job holds the cores for the full walltime whether
 you use them or not. Keep the allocation small (the 4 core / 32 GB default is
 deliberate) and end it when you're done with `tmux-srun <name> --end`. Real
 compute still belongs in its own `sbatch` job.
@@ -139,6 +153,48 @@ timeout the job stays queued and nothing is cancelled. Other defaults are
 overridable per-run with the flags above, or persistently via `TMUX_SRUN_TIME`,
 `TMUX_SRUN_CPUS`, `TMUX_SRUN_MEM`, `TMUX_SRUN_WORKDIR` and `TMUX_SRUN_ACCOUNT`
 (default `a_frazer`, matching this repo's `vscode.sh` scripts).
+
+## herdr-srun: persistent multi-agent workbench
+
+[herdr](https://herdr.dev) is a terminal multiplexer built for coding agents:
+a sidebar shows which Claude session is **working**, **blocked** waiting for
+you, or **done**, and it is mouse-first (click, drag splits, right-click
+menus). `herdr-srun` is `tmux-srun` with herdr inside — same flags, same
+`--attach` / `--end` / `--status`, same rejoin-from-any-login-node behaviour,
+and the same rule: `herdr server` runs in the batch step, each attach runs only
+`herdr client`.
+
+```bash
+herdr-srun agents                 # 72h, 4 cores, 32 GB
+herdr-srun agents --end           # free the cores
+```
+
+Inside: prefix is `Ctrl-a` (herdr's default `Ctrl-b` is taken by Claude Code),
+`Ctrl-a ?` lists every key, `Ctrl-a q` detaches.
+
+**When the job ends** — walltime or `--end` — start the same name again and
+herdr restores the layout and puts each Claude pane back into its previous
+conversation. Ordinary commands start fresh. This needs, once:
+
+```bash
+herdr integration install claude
+```
+
+which adds a `SessionStart` hook to `~/.claude/settings.json` (inert outside
+herdr). State is kept per workbench name under
+`~/.config/herdr/sessions/<name>/`, and saved 5 s after each change.
+
+Sockets live in node-local `/tmp` (`HERDR_SOCKET_PATH`), not herdr's default
+under `~/.config`, which is on the shared home: a stray `herdr` on a login
+node would otherwise find that socket and could start a second server there.
+
+`herdr --remote` (a local herdr UI on your laptop) does **not** work on Bunya:
+logins need Okta 2FA, SSH keys are not allowed, and compute nodes accept
+neither. Plain SSH to a login node, then `herdr-srun <name>`.
+
+Defaults are overridable with `HERDR_SRUN_TIME`, `HERDR_SRUN_CPUS`,
+`HERDR_SRUN_MEM`, `HERDR_SRUN_WORKDIR`, `HERDR_SRUN_ACCOUNT` and
+`HERDR_SRUN_WAIT`.
 
 ## Plots over SSH
 
