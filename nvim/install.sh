@@ -27,6 +27,9 @@ Installs the Neovim + tmux setup for R/Quarto:
   ~/.local/bin/tmux-srun              persistent Slurm workbench launcher (tmux)
   ~/.local/bin/herdr-srun             persistent Slurm workbench launcher (herdr)
   ~/.config/herdr/config.toml         herdr config, only if you have none
+  ~/.config/herdr-automatic-rename/config.sh
+                                      rename plugin config, only if you have none
+  ~/.claude/statusline.sh             Claude Code status line, only if you have none
   ~/.bashrc / ~/.zshrc                managed block adding ~/.local/bin to PATH
 
 Options:
@@ -159,22 +162,35 @@ log "== Slurm launchers =="
 install_file "$NVIM_ROOT/bin/tmux-srun" "$HOME/.local/bin/tmux-srun" 1
 install_file "$NVIM_ROOT/bin/herdr-srun" "$HOME/.local/bin/herdr-srun" 1
 
-# herdr config: a starting point only. Unlike the managed blocks there is no
+# herdr configs: a starting point only. Unlike the managed blocks there is no
 # marker syntax to merge into, so an existing config is left untouched.
-HERDR_CFG="$HOME/.config/herdr/config.toml"
-if [[ -f "$HERDR_CFG" ]]; then
-  cmp -s "$HERDR_CFG" "$NVIM_ROOT/herdr/config.toml" \
-    && log "unchanged: $HERDR_CFG" \
-    || log "kept existing: $HERDR_CFG (template: nvim/herdr/config.toml)"
-else
-  install_file "$NVIM_ROOT/herdr/config.toml" "$HERDR_CFG"
-fi
+install_if_absent() {
+  local rel="$1" dst="$2" exe="${3:-0}"
+  if [[ -f "$dst" ]]; then
+    cmp -s "$dst" "$NVIM_ROOT/$rel" \
+      && log "unchanged: $dst" \
+      || log "kept existing: $dst (template: nvim/$rel)"
+  else
+    install_file "$NVIM_ROOT/$rel" "$dst" "$exe"
+  fi
+}
+install_if_absent herdr/config.toml "$HOME/.config/herdr/config.toml"
+# Read by the herdr-automatic-rename plugin (--with-herdr-plugins); harmless without it.
+install_if_absent herdr/automatic-rename.config.sh "$HOME/.config/herdr-automatic-rename/config.sh"
 
 # Claude session restore needs herdr's Claude integration. It edits
 # ~/.claude/settings.json, so it is suggested rather than done here.
 if command -v herdr >/dev/null && command -v claude >/dev/null \
    && ! grep -q herdr-agent-state "$HOME/.claude/settings.json" 2>/dev/null; then
   log "-> for Claude session restore in herdr-srun, run once:  herdr integration install claude"
+fi
+
+# Claude Code status line (dir > branch, right-justified context bar, model,
+# effort). Turning it on edits ~/.claude/settings.json, so that is suggested.
+install_if_absent claude/statusline.sh "$HOME/.claude/statusline.sh" 1
+if ! grep -q '"statusLine"' "$HOME/.claude/settings.json" 2>/dev/null; then
+  log '-> to use the Claude status line, add to ~/.claude/settings.json:'
+  log '     "statusLine": {"type": "command", "command": "~/.claude/statusline.sh", "padding": 2}'
 fi
 
 # Migration: this launcher used to be called tmux-claude. Remove the old copy

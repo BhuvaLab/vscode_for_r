@@ -6,6 +6,8 @@
 # Same prefix as ~/.tmux.conf. The default ctrl+b collides with Claude Code,
 # which uses ctrl+b to background a running command.
 prefix = "ctrl+a"
+# tmux-style: | splits side by side (default was prefix+v).
+split_vertical = "prefix+|"
 
 [session]
 # When a workbench job ends (walltime or --end) and you start it again, reopen
@@ -13,3 +15,62 @@ prefix = "ctrl+a"
 # `herdr integration install claude` (once; it adds a SessionStart hook to
 # ~/.claude/settings.json that does nothing outside herdr).
 resume_agents_on_restore = true
+
+[theme]
+# Matches the herdr.dev hero mock (data-palette="catppuccin").
+name = "catppuccin"
+auto_switch = false
+
+[theme.custom]
+# Flat inactive tabs on the tab-bar colour (catppuccin mantle), like the
+# herdr.dev mock. surface0 is only the inactive-tab fill; herdr has no
+# option for the mock's thin rules between tabs.
+surface0 = "#181825"
+
+[ui]
+tab_bar_position = "top"
+pane_borders = "auto"
+pane_gaps = true
+# Label split panes "claude" / "bun" etc. on their borders.
+show_agent_labels_on_pane_borders = true
+# "agents · grouped" panel with ●/○/◉ state dots.
+agent_panel_sort = "spaces"
+status_indicators = "dots"
+
+[ui.sidebar.spaces]
+row_gap = 0
+# Same style as agent rows: bold, bright name; plain muted detail line.
+rows = [
+  ["state_icon", { token = "workspace", fg = "#cdd6f4", bold = true }],
+  [{ token = "branch", fg = "#6c7086" }, { token = "git_status", fg = "#6c7086" }],
+]
+
+[ui.sidebar.agents]
+row_gap = 0
+# All agents here share one space, so name each row by the title the agent
+# sets for itself (Claude Code: the session title, spinner glyph removed).
+# Like the mock: bold, bright name; plain status line under it (state
+# colour kept, agent kind muted). Terminals can't shrink text, so weight and
+# colour carry the hierarchy.
+# Third row: this pane's context from the usagebar plugin ("⛁ 22% (217k)").
+# Plan limits are account-wide, so they live in the Ctrl-a u popup, not here.
+# The cache hit rate only shows when it is poor (yellow <80%, red <50%).
+rows = [
+  ["state_icon", { token = "terminal_title_stripped", fg = "#cdd6f4", bold = true }],
+  ["state_text", { token = "agent", fg = "#6c7086" }],
+  [{ token = "$context", fg = "#6c7086" }],
+  [{ token = "$cache_mid", fg = "#f9e2af" }, { token = "$cache_low", fg = "#f38ba8" }],
+]
+
+# usagebar plugin: Ctrl-a u opens the Agent Usage view (5h / weekly windows,
+# reset times, per-pane share) as a popup; q closes it. The plugin's own
+# open-limits action can only split, so this runs its pane command directly
+# (the glob survives the hashed plugin dir changing on update). Ctrl-shift chords
+# rarely survive SSH from a Mac, hence the prefix key.
+[[keys.command]]
+key = "prefix+u"
+type = "popup"
+command = "~/.config/herdr/plugins/github/usagebar-*/bin/run-limits-pane.sh"
+width = "70%"
+height = "50%"
+description = "Agent Usage: limits popup"

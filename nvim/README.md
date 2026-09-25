@@ -39,6 +39,8 @@ That installs:
 | `~/.local/bin/tmux-srun` | the Slurm session launcher (tmux) |
 | `~/.local/bin/herdr-srun` | the Slurm session launcher (herdr) |
 | `~/.config/herdr/config.toml` | herdr config — only if you don't have one |
+| `~/.config/herdr-automatic-rename/config.sh` | rename plugin config (no `[N]` numbers on tabs and spaces) — only if you don't have one |
+| `~/.claude/statusline.sh` | Claude Code status line — only if you don't have one; enabling it in `settings.json` is suggested, not done |
 | `~/.bashrc`, `~/.zshrc` | a managed block putting `~/.local/bin` first on `PATH` |
 
 It then **reports** which command-line tools are missing. To fetch them:
@@ -183,6 +185,22 @@ herdr integration install claude
 which adds a `SessionStart` hook to `~/.claude/settings.json` (inert outside
 herdr). State is kept per workbench name under
 `~/.config/herdr/sessions/<name>/`, and saved 5 s after each change.
+
+**Look.** `nvim/herdr/config.toml` recreates the terminal mock on
+[herdr.dev](https://herdr.dev): the `catppuccin` theme, flat inactive tabs
+(`[theme.custom] surface0` set to the tab-bar colour; herdr has no option for
+the mock's thin rules between tabs), and sidebar rows with a bold, bright name
+over a muted detail line (branch for spaces, state and agent kind for agents).
+Agents are named by `terminal_title_stripped`, the Claude session title,
+because several agents share one space. A terminal can't shrink text, so
+weight and colour stand in for the mock's smaller second line. Set your
+terminal app to JetBrains Mono on `#11111b` to match the rest.
+
+**Claude status line.** `nvim/claude/statusline.sh` puts the directory and git
+branch (`*` dirty, `↑n`/`↓n` vs upstream) on the left and, right-justified, an
+8-cell context bar, tokens used / window, model and effort. Claude Code
+reserves 2 + `padding` columns on each side of the row; `reserve=9` in the
+script assumes `"padding": 2`, so change both together.
 
 Sockets live in node-local `/tmp` (`HERDR_SOCKET_PATH`), not herdr's default
 under `~/.config`, which is on the shared home: a stray `herdr` on a login
