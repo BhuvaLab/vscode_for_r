@@ -16,6 +16,13 @@ split_vertical = "prefix+|"
 # ~/.claude/settings.json that does nothing outside herdr).
 resume_agents_on_restore = true
 
+[terminal]
+# Pane images over the Kitty graphics protocol - what `cplot serve` draws its
+# viewer pane with. Already the default; set here so it isn't turned off
+# unknowingly. Needs a Kitty-graphics outer terminal (Ghostty, kitty, WezTerm;
+# not Terminal.app) and must be on in both the server's and client's config.
+kitty_graphics = true
+
 [theme]
 # Matches the herdr.dev hero mock (data-palette="catppuccin").
 name = "catppuccin"

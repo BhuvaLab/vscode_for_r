@@ -15,6 +15,9 @@ entirely, in a per-session cache directory, and disappear once that session ends
 below). Two Claude sessions in the same project each get their own plots and
 their own panel.
 
+Working in the terminal instead (a `herdr-srun` workbench on Bunya)? The same
+recipes and commands work there — see [In a terminal (herdr)](#in-a-terminal-herdr).
+
 ## How it works
 
 vscode-R's session watcher (the same `~/.vscode-R/init.R` / `.vsc.attach()`
@@ -128,6 +131,59 @@ so — every run is a fresh process, on purpose.
 
 No menus by design — it's meant to sit as a plotting window inside the editor,
 not a browser tab.
+
+## In a terminal (herdr)
+
+Inside a [herdr](../nvim/README.md) pane — locally, or in a `herdr-srun`
+workbench on a Bunya compute node — `cplot serve` opens a `cplot` pane to the
+right instead of a VS Code panel. That pane runs `cplot view`, which draws each
+plot with the Kitty graphics protocol. The image bytes travel inside the
+terminal stream itself, so they follow the same ssh → login node → `srun` →
+herdr hop your text does: still no server, no port, no tunnel.
+
+```
++---------------------------+-----------------------------+
+| claude                    | cplot                       |
+|                           |  umap-spanorm  v003 (3/3)   |
+|  > make the points        |  +-----------------------+  |
+|    smaller                |  |        (the plot)     |  |
+|                           |  +-----------------------+  |
+|                           |  ←→ plot ↑↓ version c code  |
++---------------------------+-----------------------------+
+```
+
+Unlike the VS Code panel, the pane is **reused**: its id is remembered for the
+session, so calling `cplot serve` again just reports the pane that's already
+open. It follows new renders on its own and closes itself once the session's
+plots are swept.
+
+| Key | Effect |
+|---|---|
+| `←` / `→` (or `h` / `l`) | switch between plots |
+| `↑` / `↓` (or `k` / `j`) | step through versions (scrolls in code view) |
+| `c` | toggle the recipe's code, diffed against the previous version |
+| `z` | zoom the pane to full window and back (herdr) |
+| `r` | redraw |
+| `q` | close the viewer |
+
+Requirements:
+
+- **A Kitty-graphics terminal on your own machine** — Ghostty, kitty or WezTerm.
+  macOS Terminal.app can't show the images, and iTerm2 currently doesn't through
+  herdr. None of these need admin: `brew install --cask --appdir="$HOME/Applications" ghostty`.
+- **herdr's `[terminal] kitty_graphics = true`** (the default; set explicitly in
+  [`nvim/herdr/config.toml`](../nvim/herdr/config.toml)).
+- **ssh, not mosh** — mosh drops the graphics.
+
+The footer shows how the viewer is drawing: `[kitty]`, or `[chafa]` / `[text]`
+when the terminal doesn't answer the Kitty graphics query (character-art via
+`chafa` if installed, otherwise just the PNG path). Outside herdr you can run the
+viewer by hand in any Kitty-graphics terminal: `cplot view` (this session) or
+`cplot view --dir <path from cplot status>`. `--term` / `--vscode` on `serve`
+force one display or the other.
+
+The pane is smaller than the webview; for a full-resolution look, `cplot export`
+the plot, or `z` to zoom the pane.
 
 ## Other commands
 
