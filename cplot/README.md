@@ -119,6 +119,9 @@ renders under the recipe's name, versioned (`v001.png`, `v002.png`, …) each ti
 you re-run it. Nothing is cached between runs unless the recipe explicitly does
 so — every run is a fresh process, on purpose.
 
+Plots are numbered in the order they were first rendered: a new plot is added
+at the end, and re-running an existing one adds a version without moving it.
+
 ## In the panel
 
 | Key / action | Effect |

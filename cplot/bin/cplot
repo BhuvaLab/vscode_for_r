@@ -99,8 +99,20 @@ def panel_title():
     return f"cplot: {os.path.basename(root)} \u00b7 {tag}"
 
 def plot_names(pd):
-    return sorted(n for n in os.listdir(pd)
-                  if not n.startswith(("_", ".")) and os.path.isdir(os.path.join(pd, n)))
+    """Plots in the order they were first rendered, so a new plot is appended
+    and a plot's number stays put when it gets new versions."""
+    names = sorted(n for n in os.listdir(pd)
+                   if not n.startswith(("_", ".")) and os.path.isdir(os.path.join(pd, n)))
+    return sorted(names, key=lambda n: created_at(pd, n))
+
+def created_at(pd, name):
+    d = os.path.join(pd, name)
+    try: return float(open(os.path.join(d, "created")).read())
+    except (OSError, ValueError): pass
+    # plots rendered before the stamp existed: fall back to their oldest version
+    ts = [os.stat(os.path.join(d, f)).st_mtime for f in os.listdir(d)
+          if re.fullmatch(r"v\d{3}\.json", f)]
+    return min(ts) if ts else float("inf")   # scaffolded, never rendered
 
 def recipe_path(pd, name):
     for ext in ("R", "py"):
@@ -264,7 +276,6 @@ def build_manifest(pd):
         plots.append({"name": name, "lang": lang,
                       "env": fm.get("env", ""), "versions": vs,
                       "failed": os.path.exists(os.path.join(d, "last_error.txt"))})
-    plots.sort(key=lambda p: p["versions"][-1]["ts"], reverse=True)
     save(os.path.join(pd, "_manifest.json"),
          {"generated": datetime.now().strftime("%H:%M:%S"), "plots": plots})
     return plots
@@ -370,6 +381,10 @@ def cmd_run(args):
     for em in emitted:
         pname = em["name"]
         pdir = os.path.join(pd, pname); os.makedirs(pdir, exist_ok=True)
+        stamp = os.path.join(pdir, "created")
+        if not os.path.exists(stamp):
+            t = created_at(pd, pname)   # a plot rendered before stamps keeps its place
+            open(stamp, "w").write("%.6f" % (time.time() if t == float("inf") else t))
         v = (versions(pd, pname)[-1] + 1) if versions(pd, pname) else 1
         tag = f"v{v:03d}"
         dst = os.path.join(pdir, tag + ".png")
