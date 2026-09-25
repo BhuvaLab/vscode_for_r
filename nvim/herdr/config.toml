@@ -62,6 +62,17 @@ rows = [
   [{ token = "$cache_mid", fg = "#f9e2af" }, { token = "$cache_low", fg = "#f38ba8" }],
 ]
 
+# Claude agents: model and effort instead of the agent kind ("working · Opus
+# 5.5 · medium"). ~/.claude/statusline.sh publishes $model / $effort for its
+# pane; until its first refresh the row shows just the state.
+[ui.sidebar.agents.rows_by_agent]
+claude = [
+  ["state_icon", { token = "terminal_title_stripped", fg = "#cdd6f4", bold = true }],
+  ["state_text", { token = "$model", fg = "#cba6f7" }, { token = "$effort", fg = "#6c7086" }],
+  [{ token = "$context", fg = "#6c7086" }],
+  [{ token = "$cache_mid", fg = "#f9e2af" }, { token = "$cache_low", fg = "#f38ba8" }],
+]
+
 # usagebar plugin: Ctrl-a u opens the Agent Usage view (5h / weekly windows,
 # reset times, per-pane share) as a popup; q closes it. The plugin's own
 # open-limits action can only split, so this runs its pane command directly

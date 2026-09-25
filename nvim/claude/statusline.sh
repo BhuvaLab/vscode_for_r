@@ -64,6 +64,22 @@ if [[ -n $model ]]; then
   [[ -n $effort ]] && right+="${grey} · ${effort}${reset}"
 fi
 
+# Inside herdr, publish model and effort as $model / $effort tokens on this
+# pane's sidebar agent row. Only when they change: the status line runs often.
+if [[ -n ${HERDR_PANE_ID:-} && -n $model ]] && command -v herdr >/dev/null; then
+  # Keyed by the socket too: a new herdr server (next workbench job) starts
+  # without the tokens, so the same pane id must publish again.
+  key="${HERDR_SOCKET_PATH:-}-${HERDR_SESSION:-default}-$HERDR_PANE_ID"
+  cache="${TMPDIR:-/tmp}/claude-statusline-$USER/${key//[^A-Za-z0-9]/_}"
+  if [[ $(cat "$cache" 2>/dev/null) != "$model|$effort" ]]; then
+    mkdir -p "${cache%/*}"
+    args=(--token "model=$model")
+    if [[ -n $effort ]]; then args+=(--token "effort=$effort"); else args+=(--clear-token effort); fi
+    timeout 2 herdr pane report-metadata "$HERDR_PANE_ID" --source claude-statusline "${args[@]}" \
+      >/dev/null 2>&1 && printf '%s' "$model|$effort" >"$cache"
+  fi
+fi
+
 # Right-justify context/model. Claude Code captures stdout, so the width comes
 # from $COLUMNS (which it sets). It reserves 2 built-in + `padding` (2) columns
 # on EACH side - measured on a 185-col pane: 177 usable, overflow gets "…" -
