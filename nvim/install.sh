@@ -6,6 +6,7 @@ NVIM_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 DRY_RUN=0
 WITH_TOOLS=0
+WITH_HERDR_PLUGINS=0
 
 TMUX_BEGIN="# >>> vscode_for_r managed block >>>"
 TMUX_END="# <<< vscode_for_r managed block <<<"
@@ -18,7 +19,7 @@ TREE_SITTER_VERSION="0.25.10"
 
 usage() {
   cat <<EOF
-Usage: $SCRIPT_NAME [--with-tools] [--dry-run]
+Usage: $SCRIPT_NAME [--with-tools] [--with-herdr-plugins] [--dry-run]
 
 Installs the Neovim + tmux setup for R/Quarto:
   ~/.config/nvim/                     Neovim config (lazy.nvim, R.nvim, Quarto, LSP)
@@ -33,6 +34,9 @@ Options:
                  fd, tree-sitter CLI, herdr) and build the Python LSP venv. Roughly
                  450 MB. Without this flag the installer only REPORTS what is
                  missing.
+  --with-herdr-plugins
+                 Also install the herdr plugins listed in nvim/herdr/plugins.txt,
+                 each pinned to its reviewed commit. Needs herdr on PATH.
   --dry-run, -n  Preview actions without writing files.
   --help, -h     Show this help text.
 EOF
@@ -45,6 +49,7 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 for arg in "$@"; do
   case "$arg" in
     --with-tools) WITH_TOOLS=1 ;;
+    --with-herdr-plugins) WITH_HERDR_PLUGINS=1 ;;
     --dry-run|-n) DRY_RUN=1 ;;
     --help|-h) usage; exit 0 ;;
     *) printf 'ERROR: Unknown argument: %s\n' "$arg" >&2; usage >&2; exit 1 ;;
@@ -181,6 +186,52 @@ if [[ -f "$HOME/.local/bin/tmux-claude" ]]; then
     rm -f "$HOME/.local/bin/tmux-claude"
     log "removed superseded: $HOME/.local/bin/tmux-claude (renamed to tmux-srun)"
   fi
+fi
+
+# herdr plugins: third-party code that runs unsandboxed as you, so never
+# installed without asking. Each is pinned to the commit that was reviewed;
+# a plugin already installed at another ref is reported, not replaced.
+HERDR_PLUGINS="$NVIM_ROOT/herdr/plugins.txt"
+if (( WITH_HERDR_PLUGINS )); then
+  command -v herdr >/dev/null || die "--with-herdr-plugins needs herdr (install with --with-tools)"
+  INSTALLED="$(herdr plugin list 2>/dev/null || true)"
+  while read -r id repo ref digest; do
+    [[ -z "$id" || "$id" == \#* ]] && continue
+    if grep -Fq "[github:$repo@$ref]" <<<"$INSTALLED"; then
+      log "unchanged: herdr plugin $id"
+      continue
+    elif grep -Eq "^- $id " <<<"$INSTALLED"; then
+      warn "herdr plugin $id is installed at a different ref; leaving it (pinned: $ref)"
+      continue
+    fi
+    if (( DRY_RUN )); then
+      log "[dry-run] herdr plugin install $repo --ref $ref"
+      continue
+    fi
+    herdr plugin install "$repo" --ref "$ref" --yes >/dev/null \
+      || { warn "herdr plugin $id failed to install"; continue; }
+    # A plugin whose own installer does not verify its download: check the
+    # built binary against the digest recorded at review time.
+    if [[ -n "${digest:-}" ]]; then
+      if find "$HOME"/.config/herdr/plugins/github/"$id"-*/ -type f -size +1M -exec sha256sum {} + 2>/dev/null \
+         | grep -q "^$digest "; then
+        log "installed: herdr plugin $id (binary digest verified)"
+      else
+        herdr plugin uninstall "$id" >/dev/null 2>&1 || true
+        warn "herdr plugin $id: binary does not match the reviewed digest - uninstalled"
+      fi
+    else
+      log "installed: herdr plugin $id"
+    fi
+  done < "$HERDR_PLUGINS"
+  # reviewr's build links ~/.local/bin/herdr-reviewr into the temporary
+  # checkout, which herdr then moves: re-point a dangling link.
+  if (( ! DRY_RUN )) && [[ -L "$HOME/.local/bin/herdr-reviewr" && ! -e "$HOME/.local/bin/herdr-reviewr" ]]; then
+    ln -sfn "$(ls -d "$HOME"/.config/herdr/plugins/github/persiyanov.reviewr-*/bin/herdr-reviewr | head -1)" \
+      "$HOME/.local/bin/herdr-reviewr" && log "repaired: $HOME/.local/bin/herdr-reviewr link"
+  fi
+elif command -v herdr >/dev/null; then
+  log "-> reviewed herdr plugins (nvim/herdr/plugins.txt):  bash $SCRIPT_NAME --with-herdr-plugins"
 fi
 
 # ---------------------------------------------------------------------------

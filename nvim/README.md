@@ -188,6 +188,32 @@ Sockets live in node-local `/tmp` (`HERDR_SOCKET_PATH`), not herdr's default
 under `~/.config`, which is on the shared home: a stray `herdr` on a login
 node would otherwise find that socket and could start a second server there.
 
+### Plugins
+
+Three reviewed [herdr plugins](https://herdr.dev/plugins/) are listed in
+`nvim/herdr/plugins.txt`, each pinned to the commit whose source was read:
+
+| Plugin | What it does |
+|---|---|
+| [herdr-automatic-rename](https://github.com/qu8n/herdr-automatic-rename) | names tabs from the folder, git branch and Claude session title |
+| [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr) | review an agent's diff beside the chat and send line comments back (git projects) |
+| [herdr-agent-usage](https://github.com/senna-lang/herdr-agent-usage) | context meters and rate-limit toasts in the sidebar |
+
+```bash
+bash nvim/install.sh --with-herdr-plugins
+```
+
+They are opt-in because plugins are ordinary code running as you, unsandboxed.
+Already-installed plugins at the pinned commit are left alone; one installed at
+a different commit is reported, not replaced. usagebar's own installer does not
+verify its download, so the built binary is checked against the digest in
+`plugins.txt` and uninstalled on a mismatch. To bump a plugin, review the new
+commit first, then change its ref there.
+
+Considered and left out: herdr-pluck (copies only through `xclip`/`wl-copy`,
+which do nothing on a headless node) and herdr-projects (its worktree and
+pull-request model moves work out of the project folder).
+
 `herdr --remote` (a local herdr UI on your laptop) does **not** work on Bunya:
 logins need Okta 2FA, SSH keys are not allowed, and compute nodes accept
 neither. Plain SSH to a login node, then `herdr-srun <name>`.

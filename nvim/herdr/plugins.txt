@@ -1,0 +1,24 @@
+# herdr plugins installed by `nvim/install.sh --with-herdr-plugins`.
+#
+# Each is pinned to the exact commit whose source was reviewed (2026-09-25):
+# plugins run unsandboxed as you, with your full environment. To bump one,
+# review the new commit first, then change its ref here.
+#
+# Fields: <id> <owner/repo> <commit> [sha256 of the built binary to verify]
+#
+# herdr-automatic-rename  tab names from directory, git branch and the Claude
+#                         session title. Pure bash; reads the ends of local
+#                         ~/.claude/projects transcripts for titles, sends nothing.
+# persiyanov.reviewr      review agent diffs beside the chat and send line
+#                         comments back. Git projects only. Static binary, built
+#                         by GitHub Actions; its installer checks the checksum.
+# usagebar                context meters and rate-limit toasts. Never reads the
+#                         Claude OAuth token. Its installer does NOT verify its
+#                         download, so the digest below is checked afterwards.
+#
+# Reviewed and left out: herdr-pluck (copies only via xclip/wl-copy, useless on
+# a headless node) and herdr-projects (worktree/PR model moves work out of the
+# project folder).
+herdr-automatic-rename  qu8n/herdr-automatic-rename     081489b4d961d0d9c0c8b6a02d472e5cfe125ad5
+persiyanov.reviewr      persiyanov/herdr-reviewr        cd618b48dc1f4d2cc092f3f26827ac72fb44773e
+usagebar                senna-lang/herdr-agent-usage    956aa4f3efa5e86f4d5f1665533210bb7eadaa09  ddb9077371132d038c142bf311ebf8cb85deef9dc7fe7143d4f619f85b29aaa4
