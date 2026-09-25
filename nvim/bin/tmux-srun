@@ -16,8 +16,9 @@
 #      +-------------------+                 | bash -> claude, R, ... |
 #                                            +------------------------+
 #
-#  The job is submitted with sbatch and holds the node with `sleep infinity`.
-#  tmux runs INSIDE that job, on the compute node. To rejoin, SLURM routes a
+#  The job is submitted with sbatch, and its BATCH step starts and owns the
+#  tmux server (see "WHERE THE TMUX SERVER LIVES" below - getting this wrong
+#  is why sessions used to die on disconnect). Attaching is a client only. To rejoin, SLURM routes a
 #  new job step to wherever the job is - so it does not matter which login
 #  node you land on.
 #
@@ -36,7 +37,7 @@
 #      the login node) took the allocation with it.
 #    * It survives a dropped connection with nothing held open at all.
 #
-#  THE COST, stated plainly: `sleep infinity` holds the cores for the FULL
+#  THE COST, stated plainly: the batch step holds the cores for the FULL
 #  walltime whether you use them or not, where the old srun released them the
 #  moment you exited the shell. Keep the allocation small (the 4 core / 32G
 #  default is deliberate), and end it when you are done:
@@ -111,6 +112,73 @@ jobid_any() {
 state_of() { squeue -j "$1" -h -o "%T" 2>/dev/null; }
 
 # ---------------------------------------------------------------------------
+# WHERE THE TMUX SERVER LIVES (fixed 2026-09-25).
+#
+# The server must be started by the BATCH step, and every attach must be a
+# plain client. SLURM confines each job step to its own cgroup and SIGKILLs
+# everything in it when the step ends - including a tmux server that
+# daemonised out of it. The previous version attached with
+# `srun --pty tmux new-session -A`, so the FIRST attach created the server
+# inside that srun step. Drop the SSH connection, srun loses its pty, the step
+# is cancelled, and the server and every Claude session in it die with it
+# (job 28849447: step .0 CANCELLED with signal 9 at 20:48, new empty server
+# in step .1 at 20:51). Now the batch payload keeps the server alive and an
+# attach step can die freely.
+#
+# The socket is per job (-L ws-<jobid>), not the default: /tmp is node-wide on
+# Bunya (no job_container), so two of your jobs on one node would otherwise
+# share one server - living in whichever job's cgroup started it.
+# ---------------------------------------------------------------------------
+sock_for() { echo "ws-$1"; }
+
+# join_cmd <jobid>: shell code, run ON THE NODE, that waits for the batch
+# step's server and attaches as a client. It never creates the server - except
+# for a job submitted by the old version (batch = bare `sleep infinity`), where
+# nothing else will, and it says so.
+join_cmd() {
+  local L; L=$(sock_for "$1")
+  cat <<EOF
+i=0
+until tmux -L '$L' has-session -t '$SESSION' 2>/dev/null; do
+  i=\$((i+1))
+  if [ \$i -gt 20 ]; then
+    echo "tmux-srun: no server on socket '$L' - job predates the 2026-09-25 fix." >&2
+    if tmux has-session -t '$SESSION' 2>/dev/null; then
+      echo "           Attaching to its old server, which will NOT survive a dropped" >&2
+      echo "           connection. End it and start a new session to get the fix." >&2
+      exec tmux attach -t '$SESSION'
+    fi
+    echo "           Its old server is gone. End it (--end) and start a new session." >&2
+    exit 1
+  fi
+  sleep 1
+done
+exec tmux -L '$L' attach -t '$SESSION'
+EOF
+}
+
+# serve_cmd: the batch payload. Holds the node (as `sleep infinity` used to)
+# AND owns the tmux server, recreating the session within 5s if its last
+# window is closed, so an attach always has something to join. End it with
+# --end, as before.
+#
+# The thread caps belong here: panes inherit the SERVER's environment, and a
+# multithreaded BLAS otherwise reads the HOST core count (192 on a general
+# node), not the cgroup limit.
+serve_cmd() {
+  local L='ws-$SLURM_JOB_ID'
+  cat <<EOF
+export OMP_NUM_THREADS=$CPUS OPENBLAS_NUM_THREADS=$CPUS MKL_NUM_THREADS=$CPUS
+while :; do
+  tmux -L "$L" has-session -t '$SESSION' 2>/dev/null ||
+    tmux -L "$L" new-session -d -s '$SESSION' -c '$WORKDIR'
+  sleep 5
+done
+EOF
+}
+
+
+# ---------------------------------------------------------------------------
 # --status: scheduler-wide, so it is honest from anywhere. The old version
 # ran `tmux ls` locally, which reported "(none)" whenever you were on the
 # wrong login node - exactly the failure this rewrite removes.
@@ -174,7 +242,7 @@ fi
 if [ -n "${SLURM_JOB_ID:-}" ]; then
   if [ "$(squeue -j "$SLURM_JOB_ID" -h -o '%j' 2>/dev/null)" = "$SESSION" ]; then
     echo "Already inside job $SLURM_JOB_ID on $(hostname -s); attaching locally."
-    exec tmux new-session -A -s "$SESSION" -c "$WORKDIR"
+    exec bash -c "$(join_cmd "$SLURM_JOB_ID")"
   fi
   die "already inside SLURM job $SLURM_JOB_ID (on $(hostname -s)), which is not
         '$SESSION'. Run this from a login node, or use this allocation directly."
@@ -185,23 +253,23 @@ command -v squeue >/dev/null || die "squeue not found - is SLURM on PATH?"
 
 # ---------------------------------------------------------------------------
 # attach_to <jobid>: route a login shell into the job and join the tmux
-# session there, creating it on first use. `new-session -A` is attach-or-create
-# in one call, so this is the same command whether the session exists yet.
+# session there as a client.
 #
 # --overlap is required: without it the step waits for resources the job's own
-# `sleep infinity` step already holds, and blocks forever.
+# batch step already holds, and blocks forever.
 # --cpu-bind=none stops a stale CPU-bind mask being inherited when this is run
 # from inside another allocation ("CPU binding outside of job step allocation").
-# The thread caps are exported here, not in the job: a multithreaded BLAS reads
-# the HOST core count (192 on a general node), not the cgroup limit.
+# --mem=256M: the step only runs a tmux client (panes live in the batch step).
+# Without it the step claims the job's whole memory and a second concurrent
+# attach - e.g. laptop and desktop - fails with "Memory required by task is
+# not available".
 # ---------------------------------------------------------------------------
 attach_to() {
   local jid="$1" node
   node=$(squeue -j "$jid" -h -o "%N" 2>/dev/null)
   echo "Attaching to '$SESSION' (job $jid on ${node:-?}) - detach with Ctrl-a d."
-  export OMP_NUM_THREADS="$CPUS" OPENBLAS_NUM_THREADS="$CPUS" MKL_NUM_THREADS="$CPUS"
-  exec srun --overlap --jobid="$jid" --cpu-bind=none --export=ALL --pty \
-       tmux new-session -A -s "$SESSION" -c "$WORKDIR"
+  exec srun --overlap --jobid="$jid" --cpu-bind=none --mem=256M --export=ALL --pty \
+       bash -c "$(join_cmd "$jid")"
 }
 
 # wait_running <jobid>: block until the job starts, or give up without
@@ -281,7 +349,7 @@ JID=$(sbatch --parsable \
   --nodes=1 --ntasks=1 --cpus-per-task="${CPUS}" --mem="${MEM}" \
   --time="${WALLTIME}" --chdir="${WORKDIR}" \
   -o "${LOGDIR}/${SESSION}-%j.out" -e "${LOGDIR}/${SESSION}-%j.out" \
-  --wrap='sleep infinity') || die "sbatch failed"
+  --wrap="$(serve_cmd)") || die "sbatch failed"
 
 echo "submitted job ${JID}"
 wait_running "$JID"; echo
