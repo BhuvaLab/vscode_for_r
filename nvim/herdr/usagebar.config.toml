@@ -1,0 +1,14 @@
+# usagebar (herdr-agent-usage) plugin config. Defaults as seeded by
+# `herdr plugin action invoke usagebar.setup`, except limit_percent.
+# Installed by nvim/install.sh to ~/.config/herdr/plugins/config/usagebar/,
+# only when absent (the plugin seeds its own defaults only when it is missing).
+
+[notify]
+enabled = true
+# Toast thresholds stay in % REMAINING even with limit_percent = "used".
+remaining_thresholds = [50, 20, 10, 5]
+
+[ui]
+# Show how much of each plan window is used ("5h 16%"), not how much is left.
+limit_percent = "used"
+cache_display = true

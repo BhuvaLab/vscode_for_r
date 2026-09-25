@@ -29,6 +29,8 @@ Installs the Neovim + tmux setup for R/Quarto:
   ~/.config/herdr/config.toml         herdr config, only if you have none
   ~/.config/herdr-automatic-rename/config.sh
                                       rename plugin config, only if you have none
+  ~/.config/herdr/plugins/config/usagebar/config.toml
+                                      usagebar plugin config, only if you have none
   ~/.claude/statusline.sh             Claude Code status line, only if you have none
   ~/.bashrc / ~/.zshrc                managed block adding ~/.local/bin to PATH
 
@@ -177,6 +179,8 @@ install_if_absent() {
 install_if_absent herdr/config.toml "$HOME/.config/herdr/config.toml"
 # Read by the herdr-automatic-rename plugin (--with-herdr-plugins); harmless without it.
 install_if_absent herdr/automatic-rename.config.sh "$HOME/.config/herdr-automatic-rename/config.sh"
+# usagebar (--with-herdr-plugins): show plan limits as % used, not % remaining.
+install_if_absent herdr/usagebar.config.toml "$HOME/.config/herdr/plugins/config/usagebar/config.toml"
 
 # Claude session restore needs herdr's Claude integration. It edits
 # ~/.claude/settings.json, so it is suggested rather than done here.

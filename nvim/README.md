@@ -40,6 +40,7 @@ That installs:
 | `~/.local/bin/herdr-srun` | the Slurm session launcher (herdr) |
 | `~/.config/herdr/config.toml` | herdr config — only if you don't have one |
 | `~/.config/herdr-automatic-rename/config.sh` | rename plugin config (no `[N]` numbers on tabs and spaces) — only if you don't have one |
+| `~/.config/herdr/plugins/config/usagebar/config.toml` | usagebar plugin config (limits as % used) — only if you don't have one |
 | `~/.claude/statusline.sh` | Claude Code status line — only if you don't have one; enabling it in `settings.json` is suggested, not done |
 | `~/.bashrc`, `~/.zshrc` | a managed block putting `~/.local/bin` first on `PATH` |
 
