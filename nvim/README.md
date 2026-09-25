@@ -201,7 +201,11 @@ terminal app to JetBrains Mono on `#11111b` to match the rest.
 branch (`*` dirty, `↑n`/`↓n` vs upstream) on the left and, right-justified, an
 8-cell context bar, tokens used / window, model and effort. Claude Code
 reserves 2 + `padding` columns on each side of the row; `reserve=9` in the
-script assumes `"padding": 2`, so change both together.
+script assumes `"padding": 2`, so change both together. Inside herdr it also
+publishes `$model` / `$effort` to the sidebar and passes its JSON to usagebar's
+statusLine bridge. That bridge is the only live source for the Ctrl-a u plan
+limits. Without it, usagebar falls back to `~/.claude.json`'s rarely refreshed
+cached copy.
 
 Sockets live in node-local `/tmp` (`HERDR_SOCKET_PATH`), not herdr's default
 under `~/.config`, which is on the shared home: a stray `herdr` on a login

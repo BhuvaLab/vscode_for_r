@@ -20,7 +20,10 @@ IFS=$'\x1f' read -r dir pct used size model effort < <(jq -r '[
 dir=${dir:-$PWD}
 
 # Directory, with $HOME shortened to ~
-out="${cyan}${dir/#$HOME/\~}${reset}"
+shown=$dir
+# Not ${dir/#$HOME/\~}: macOS's bash 3.2 keeps the backslash.
+[[ $dir == "$HOME" || $dir == "$HOME"/* ]] && shown="~${dir#"$HOME"}"
+out="${cyan}${shown}${reset}"
 
 # Git branch, dirty marker, commits ahead/behind upstream
 if branch=$(git -C "$dir" --no-optional-locks symbolic-ref --short -q HEAD 2>/dev/null \
@@ -75,10 +78,21 @@ if [[ -n ${HERDR_PANE_ID:-} && -n $model ]] && command -v herdr >/dev/null; then
     mkdir -p "${cache%/*}"
     args=(--token "model=$model")
     if [[ -n $effort ]]; then args+=(--token "effort=$effort"); else args+=(--clear-token effort); fi
-    timeout 2 herdr pane report-metadata "$HERDR_PANE_ID" --source claude-statusline "${args[@]}" \
+    # macOS has no `timeout` (coreutils' is `gtimeout`); run bare without one.
+    to=(); for t in timeout gtimeout; do command -v $t >/dev/null && { to=($t 2); break; }; done
+    "${to[@]}" herdr pane report-metadata "$HERDR_PANE_ID" --source claude-statusline "${args[@]}" \
       >/dev/null 2>&1 && printf '%s' "$model|$effort" >"$cache"
   fi
 fi
+
+# Feed the same JSON to the usagebar plugin's statusLine bridge: its
+# `rate_limits` are the only live source for the Ctrl-a u popup's 5h / weekly
+# windows (otherwise it falls back to ~/.claude.json's cachedUsageUtilization,
+# which Claude Code rarely refreshes). Backgrounded; its own output is unused.
+for bridge in "$HOME"/.config/herdr/plugins/github/usagebar-*/bin/run-statusline.sh; do
+  [[ -f $bridge ]] && { bash "$bridge" <<<"$input" >/dev/null 2>&1 & disown; }
+  break
+done
 
 # Right-justify context/model. Claude Code captures stdout, so the width comes
 # from $COLUMNS (which it sets). It reserves 2 built-in + `padding` (2) columns
