@@ -92,3 +92,11 @@ command = "~/.config/herdr/plugins/github/usagebar-*/bin/run-limits-pane.sh"
 width = "70%"
 height = "50%"
 description = "Agent Usage: limits popup"
+
+# reviewr plugin: Ctrl-a f toggles its pane beside the current one (press 2
+# for the "Files" tree of the whole repo, 1 for the diff). Git repos only.
+[[keys.command]]
+key = "prefix+f"
+type = "shell"
+command = "herdr plugin action invoke toggle --plugin persiyanov.reviewr"
+description = "reviewr: toggle file tree / review pane"

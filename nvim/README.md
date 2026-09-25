@@ -219,7 +219,7 @@ Three reviewed [herdr plugins](https://herdr.dev/plugins/) are listed in
 | Plugin | What it does |
 |---|---|
 | [herdr-automatic-rename](https://github.com/qu8n/herdr-automatic-rename) | names tabs from the folder, git branch and Claude session title |
-| [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr) | review an agent's diff beside the chat and send line comments back (git projects) |
+| [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr) | review an agent's diff beside the chat and send line comments back; its Files tab is a repo file tree (Ctrl-a f toggles it; git projects) |
 | [herdr-agent-usage](https://github.com/senna-lang/herdr-agent-usage) | context meters and rate-limit toasts in the sidebar |
 
 ```bash
