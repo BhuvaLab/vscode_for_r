@@ -87,6 +87,11 @@ Front matter, all optional except on scaffolding:
 #| dpi:  150
 ```
 
+In herdr, keep `size` w × h × `dpi`² under **~5.5 megapixels**, e.g. `21x13.5`
+@ 140, `18x12` @ 150, `15x10` @ 180. Larger renders draw a blank pane (see
+Constraints). Near the cap, shrink `size`, not `dpi`: the plot stays sharp and
+the text gets relatively larger.
+
 Recipes run in a **fresh process** with cwd at the project root, so relative
 data paths work as in the project's own scripts. There is no session state.
 
@@ -119,6 +124,9 @@ rescale, re-render the recipe at a new size/dpi rather than resampling an image.
 ```bash
 cplot export <name> --to figures/fig2a.png --dpi 300 --size 12x8
 ```
+
+`export` also adds a version to the display. At print resolution (12x8 @ 300 is
+8.6 MP) that version shows blank in herdr; the exported file is unaffected.
 
 ## Other commands
 
@@ -153,3 +161,13 @@ and ephemeral is not a reason to clear proactively.
   `~/.vscode-R/request.log`; do not take it from `~/.claude/ide/*.lock`, which
   reports a different alias.
 - Panels are never reused; see the warning above.
+- **herdr silently drops images over ~5.87 megapixels** (width × height in px).
+  The pane stays blank and nothing reports an error. The PNG itself is fine, so
+  reading it does not catch this; check the pixel count with `file <png>`, which
+  prints `W x H`. herdr decodes each image to RGBA and skips any whose estimated
+  transfer (~5.35 bytes per pixel) exceeds a compiled-in 30 MiB budget. Pixel
+  count matters, not PNG file size: 3080×1960 (1.0 MB) drew blank, 3080×1820
+  (1.1 MB) drew fine. No herdr or cplot setting changes it. Verified in the herdr
+  0.9.1 source (`src/kitty_graphics/surface.rs`, `src/kitty_graphics.rs`);
+  recheck after a herdr upgrade. The VS Code gallery has no such limit that we
+  know of.
