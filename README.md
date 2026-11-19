@@ -421,12 +421,8 @@ For running Claude Code on Bunya, `herdr-srun` is `tmux-srun` with
   `Ctrl-a u` opens a popup with the 5h / weekly plan limits.
 - **Status line inside each session.** `nvim/claude/statusline.sh` shows the
   directory and git branch on the left and, right-justified, a context bar with
-  tokens used / window, prompt-cache hit rate and session cost; the model and
-  effort sit right-aligned on a second line:
-  ```
-  ~/proj > main *          ctx ████──── 3% 31k/1M · cache 92% · $0.41
-                                                      Opus 5.5 · high
-  ```
+  tokens used / window, prompt-cache hit rate, session cost, plus the model and effort:
+  `~/proj > main *     ctx ████──── 3% 31k/1M · cache 92% · $0.41 > Opus · high`.
 - **Restore.** If the job ends, start the same name again and each Claude pane
   returns to its previous conversation.
 

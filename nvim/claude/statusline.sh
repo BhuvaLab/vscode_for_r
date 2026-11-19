@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code status line, styled after the herdr.dev hero mock:
-#   ~/path > branch * ↑1        ctx ████──── 3% 31k/1M · cache 92% · $0.41
-#                                                            Opus 5.5 · high
+#   ~/path > branch * ↑1              ctx ████──── 3% 31k/1M > Opus · high
 # Reads the session JSON on stdin (see https://code.claude.com/docs/en/statusline).
 
 input=$(cat)
@@ -95,12 +94,10 @@ if (( total_in > 0 )); then
 fi
 right+="${grey} · ${cost_txt}${reset}"
 
-# Model and reasoning effort (effort is absent for models without it), on a
-# second line under the context figures so the top line has room to breathe.
-right2=""
+# Model and reasoning effort (effort is absent for models without it)
 if [[ -n $model ]]; then
-  right2="${magenta}${model}${reset}"
-  [[ -n $effort ]] && right2+="${grey} · ${effort}${reset}"
+  right+="${grey} > ${reset}${magenta}${model}${reset}"
+  [[ -n $effort ]] && right+="${grey} · ${effort}${reset}"
 fi
 
 # Inside herdr, publish model and effort as $model / $effort tokens on this
@@ -160,9 +157,4 @@ if (( gap >= 3 )); then
   printf '%s%*s%s\n' "$out" "$gap" '' "$right"
 else
   printf '%s\n' "$out${grey} > ${reset}$right"
-fi
-# Second line: model and effort, right-justified to the same edge.
-if [[ -n $right2 ]]; then
-  pad=$(( ${COLUMNS:-0} - reserve - $(visible "$right2") ))
-  if (( pad > 0 )); then printf '%*s%s\n' "$pad" '' "$right2"; else printf '%s\n' "$right2"; fi
 fi
