@@ -20,8 +20,12 @@ Opus 5.5 · medium
 ⛁ 11% (107k)  $1.43   [cache 62% when < 80%]
 ```
 
-and each Claude session shows the same status line as on the TUI:
-`~/proj > main *     ctx █─────── 11% 107k/1M · cache 98% · $1.43 > Opus 5.5 · medium`.
+and each Claude session shows the same two-line status line as on the TUI:
+
+```
+~/proj > main *          ctx █─────── 11% 107k/1M · cache 98% · $1.43
+                                                    Opus 5.5 · medium
+```
 
 ## Install
 
