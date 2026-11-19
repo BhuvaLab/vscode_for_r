@@ -7,6 +7,7 @@ NVIM_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=0
 WITH_TOOLS=0
 WITH_HERDR_PLUGINS=0
+ENABLE_CLAUDE=0
 
 TMUX_BEGIN="# >>> vscode_for_r managed block >>>"
 TMUX_END="# <<< vscode_for_r managed block <<<"
@@ -19,7 +20,7 @@ TREE_SITTER_VERSION="0.25.10"
 
 usage() {
   cat <<EOF
-Usage: $SCRIPT_NAME [--with-tools] [--with-herdr-plugins] [--dry-run]
+Usage: $SCRIPT_NAME [--with-tools] [--with-herdr-plugins] [--enable-claude] [--dry-run]
 
 Installs the Neovim + tmux setup for R/Quarto:
   ~/.config/nvim/                     Neovim config (lazy.nvim, R.nvim, Quarto, LSP)
@@ -42,6 +43,12 @@ Options:
   --with-herdr-plugins
                  Also install the herdr plugins listed in nvim/herdr/plugins.txt,
                  each pinned to its reviewed commit. Needs herdr on PATH.
+  --enable-claude
+                 Turn on the Claude Code status line (model, context, cache, cost)
+                 and herdr sidebar integration: updates ~/.claude/statusline.sh
+                 (old copy backed up), merges "statusLine" into
+                 ~/.claude/settings.json with jq (backup kept), and runs
+                 `herdr integration install claude`. Existing settings are kept.
   --dry-run, -n  Preview actions without writing files.
   --help, -h     Show this help text.
 EOF
@@ -55,6 +62,7 @@ for arg in "$@"; do
   case "$arg" in
     --with-tools) WITH_TOOLS=1 ;;
     --with-herdr-plugins) WITH_HERDR_PLUGINS=1 ;;
+    --enable-claude) ENABLE_CLAUDE=1 ;;
     --dry-run|-n) DRY_RUN=1 ;;
     --help|-h) usage; exit 0 ;;
     *) printf 'ERROR: Unknown argument: %s\n' "$arg" >&2; usage >&2; exit 1 ;;
@@ -195,6 +203,52 @@ install_if_absent claude/statusline.sh "$HOME/.claude/statusline.sh" 1
 if ! grep -q '"statusLine"' "$HOME/.claude/settings.json" 2>/dev/null; then
   log '-> to use the Claude status line, add to ~/.claude/settings.json:'
   log '     "statusLine": {"type": "command", "command": "~/.claude/statusline.sh", "padding": 2}'
+fi
+
+# --enable-claude: actually turn it on. Everything is additive and reversible:
+# the old statusline.sh and settings.json are backed up first, and settings.json
+# is merged with jq so no other key is touched.
+if (( ENABLE_CLAUDE )); then
+  CL_STATUS="$HOME/.claude/statusline.sh"
+  CL_SETTINGS="$HOME/.claude/settings.json"
+  command -v jq >/dev/null || die "--enable-claude needs jq (the status line needs it too)"
+  if [[ -f $CL_STATUS ]] && ! cmp -s "$CL_STATUS" "$NVIM_ROOT/claude/statusline.sh"; then
+    if (( DRY_RUN )); then log "[dry-run] back up $CL_STATUS to $CL_STATUS.bak"
+    else cp -p "$CL_STATUS" "$CL_STATUS.bak"; log "backed up: $CL_STATUS.bak"; fi
+  fi
+  install_file "$NVIM_ROOT/claude/statusline.sh" "$CL_STATUS" 1
+
+  want='{"type":"command","command":"~/.claude/statusline.sh","padding":2}'
+  if [[ -f $CL_SETTINGS ]] && jq -e --argjson w "$want" '.statusLine == $w' "$CL_SETTINGS" >/dev/null 2>&1; then
+    log "unchanged: statusLine in $CL_SETTINGS"
+  elif (( DRY_RUN )); then
+    log "[dry-run] set statusLine in $CL_SETTINGS"
+  else
+    mkdir -p "$HOME/.claude"
+    [[ -f $CL_SETTINGS ]] || echo '{}' > "$CL_SETTINGS"
+    jq empty "$CL_SETTINGS" 2>/dev/null || die "$CL_SETTINGS is not valid JSON; fix it and re-run"
+    cp -p "$CL_SETTINGS" "$CL_SETTINGS.bak"
+    tmp="$(mktemp)"
+    jq --argjson w "$want" '.statusLine = $w' "$CL_SETTINGS" > "$tmp" && cat "$tmp" > "$CL_SETTINGS"
+    rm -f "$tmp"
+    log "updated: statusLine in $CL_SETTINGS (backup: $CL_SETTINGS.bak)"
+  fi
+
+  if command -v herdr >/dev/null; then
+    if grep -q herdr-agent-state "$CL_SETTINGS" 2>/dev/null; then
+      log "unchanged: herdr Claude integration"
+    elif (( DRY_RUN )); then
+      log "[dry-run] herdr integration install claude"
+    else
+      herdr integration install claude >/dev/null && log "installed: herdr Claude integration" \
+        || warn "herdr integration install claude failed"
+    fi
+  else
+    warn "herdr not on PATH; skipping sidebar integration (install with --with-tools)"
+  fi
+  # Existing herdr config is never overwritten: tell the user how to get the new rows.
+  grep -q '"\$cost"' "$HOME/.config/herdr/config.toml" 2>/dev/null \
+    || log "-> your herdr config lacks the \$cost row; compare with nvim/herdr/config.toml"
 fi
 
 # Migration: this launcher used to be called tmux-claude. Remove the old copy

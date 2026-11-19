@@ -5,19 +5,37 @@
 
 input=$(cat)
 
+# Width maths below counts characters, so bash needs a UTF-8 locale or "█"
+# counts as 3 and the right side lands short of the edge. Git Bash (Windows)
+# runs status lines without one.
+probe="█"
+if (( ${#probe} != 1 )); then
+  for loc in C.UTF-8 en_US.UTF-8 C.utf8 en_US.utf8; do
+    LC_ALL=$loc; probe="█"; (( ${#probe} == 1 )) && break
+  done
+fi
+export LC_ALL
+
 cyan=$'\e[36m'; yellow=$'\e[33m'; green=$'\e[32m'; red=$'\e[31m'
 magenta=$'\e[35m'; grey=$'\e[90m'; reset=$'\e[0m'
 
 # \x1f separator: a tab would let `read` swallow an empty first field
-IFS=$'\x1f' read -r dir pct used size model effort < <(jq -r '[
+IFS=$'\x1f' read -r dir pct used size model effort cost cread ccreate cin < <(jq -r '[
   .workspace.current_dir // .cwd // "",
   (.context_window.used_percentage // 0 | floor),
   (.context_window.total_input_tokens // 0),
   (.context_window.context_window_size // 200000),
   (.model.display_name // ""),
-  (.effort.level // "")
-] | map(tostring) | join("\u001f")' <<<"$input")
+  (.effort.level // ""),
+  (.cost.total_cost_usd // 0),
+  (.context_window.current_usage.cache_read_input_tokens // 0),
+  (.context_window.current_usage.cache_creation_input_tokens // 0),
+  (.context_window.current_usage.input_tokens // 0)
+] | map(tostring) | join("\u001f")' <<<"$input" | tr -d '\r')  # jq.exe on Windows ends lines with CRLF
 dir=${dir:-$PWD}
+# Windows (Git Bash): Claude Code reports C:\Users\..., which neither the ~
+# shortening below nor every git build understands.
+[[ $dir == [A-Za-z]:\\* ]] && command -v cygpath >/dev/null && dir=$(cygpath -u "$dir")
 
 # Directory, with $HOME shortened to ~
 shown=$dir
@@ -42,7 +60,9 @@ fi
 fmt() {
   local n=$1
   if (( n >= 1000000 )); then
-    (( n % 1000000 )) && printf '%.1fM' "$(bc -l <<<"$n/1000000")" || printf '%dM' $((n / 1000000))
+    # Integer maths, not bc: Git Bash on Windows ships without it.
+    local t=$(( n / 100000 ))
+    (( t % 10 )) && printf '%d.%dM' $((t / 10)) $((t % 10)) || printf '%dM' $((t / 10))
   elif (( n >= 1000 )); then printf '%dk' $((n / 1000))
   else printf '%d' "$n"; fi
 }
@@ -61,6 +81,19 @@ done
 right="${grey}ctx ${reset}${colour}${full}${reset}${grey}${empty}${reset}"
 right+=" ${colour}${pct}%${reset}${grey} $(fmt "$used")/$(fmt "$size")${reset}"
 
+# Per-session cost and prompt-cache hit rate (share of the last request's input
+# served from cache). Cache is only shown once there is a request to measure.
+cost_txt=$(printf '$%.2f' "${cost:-0}")
+total_in=$(( cread + ccreate + cin ))
+if (( total_in > 0 )); then
+  cache_pct=$(( cread * 100 / total_in ))
+  if   (( cache_pct < 50 )); then ccol=$red
+  elif (( cache_pct < 80 )); then ccol=$yellow
+  else ccol=$green; fi
+  right+="${grey} · cache ${reset}${ccol}${cache_pct}%${reset}"
+fi
+right+="${grey} · ${cost_txt}${reset}"
+
 # Model and reasoning effort (effort is absent for models without it)
 if [[ -n $model ]]; then
   right+="${grey} > ${reset}${magenta}${model}${reset}"
@@ -74,14 +107,32 @@ if [[ -n ${HERDR_PANE_ID:-} && -n $model ]] && command -v herdr >/dev/null; then
   # without the tokens, so the same pane id must publish again.
   key="${HERDR_SOCKET_PATH:-}-${HERDR_SESSION:-default}-$HERDR_PANE_ID"
   cache="${TMPDIR:-/tmp}/claude-statusline-$USER/${key//[^A-Za-z0-9]/_}"
-  if [[ $(cat "$cache" 2>/dev/null) != "$model|$effort" ]]; then
+  sig="$model|$effort|$cost_txt"
+  if [[ $(cat "$cache" 2>/dev/null) != "$sig" ]]; then
     mkdir -p "${cache%/*}"
-    args=(--token "model=$model")
+    args=(--token "model=$model" --token "cost=$cost_txt")
     if [[ -n $effort ]]; then args+=(--token "effort=$effort"); else args+=(--clear-token effort); fi
     # macOS has no `timeout` (coreutils' is `gtimeout`); run bare without one.
     to=(); for t in timeout gtimeout; do command -v $t >/dev/null && { to=($t 2); break; }; done
     "${to[@]}" herdr pane report-metadata "$HERDR_PANE_ID" --source claude-statusline "${args[@]}" \
-      >/dev/null 2>&1 && printf '%s' "$model|$effort" >"$cache"
+      >/dev/null 2>&1 && printf '%s' "$sig" >"$cache"
+  fi
+fi
+
+# Herdr desktop app (Windows/macOS GUI, herdr-core `hc`): there is no
+# report-metadata, so publish the same facts as labels on this terminal. The
+# `agents-rich` mod (herdr-app/mods/agents-rich) shows them on the agent row.
+if [[ -n ${HC_TERMINAL_ID:-} && -n $model ]] && command -v hc >/dev/null; then
+  ctx_txt="⛁ ${pct}% ($(fmt "$used"))"
+  key="${HC_TERMINAL_SOCKET:-}-$HC_TERMINAL_ID"
+  cache="${TMPDIR:-/tmp}/claude-statusline-${USER:-$USERNAME}/hc-${key//[^A-Za-z0-9]/_}"
+  sig="$model|$effort|$ctx_txt|$cost_txt|${cache_pct:-}"
+  if [[ $(cat "$cache" 2>/dev/null) != "$sig" ]]; then
+    mkdir -p "${cache%/*}"
+    to=(); command -v timeout >/dev/null && to=(timeout 2)
+    "${to[@]}" hc label "$HC_TERMINAL_ID" "claude.model=$model" "claude.effort=$effort" \
+      "claude.context=$ctx_txt" "claude.cost=$cost_txt" "claude.cache=${cache_pct:-}" \
+      >/dev/null 2>&1 && printf '%s' "$sig" >"$cache"
   fi
 fi
 

@@ -409,8 +409,39 @@ tmux-srun bigfit --cpus 8 --mem 64G --time 8:00:00
 tmux-srun analysis --end     # give the cores back when you're done
 ```
 
+### Claude Code sessions: herdr workbench and status line
+
+For running Claude Code on Bunya, `herdr-srun` is `tmux-srun` with
+[herdr](https://herdr.dev) inside, and it changes how a Claude session looks:
+
+- **Agents pane (sidebar).** One row per Claude session: the session title, its
+  state (working / blocked / done), the **model and effort** (e.g.
+  `working · Opus 5.5 · medium`), and the pane's **context usage**
+  (e.g. `⛁ 22% (217k)`) and session **cost**. A cache-hit warning appears only when it is poor.
+  `Ctrl-a u` opens a popup with the 5h / weekly plan limits.
+- **Status line inside each session.** `nvim/claude/statusline.sh` shows the
+  directory and git branch on the left and, right-justified, a context bar with
+  tokens used / window, prompt-cache hit rate, session cost, plus the model and effort:
+  `~/proj > main *     ctx ████──── 3% 31k/1M · cache 92% · $0.41 > Opus · high`.
+- **Restore.** If the job ends, start the same name again and each Claude pane
+  returns to its previous conversation.
+
+```bash
+herdr-srun agents                          # start / rejoin the workbench
+bash nvim/install.sh --with-herdr-plugins  # adds the context meters (usagebar)
+bash nvim/install.sh --enable-claude         # turns on the status line + herdr integration
+```
+
+The agents-pane context and model need all of: the status line enabled in
+`~/.claude/settings.json`
+(`"statusLine": {"type": "command", "command": "~/.claude/statusline.sh", "padding": 2}`),
+the usagebar plugin (`--with-herdr-plugins`), and, for session restore,
+`herdr integration install claude`. The installer only suggests the
+`settings.json` edit rather than making it, so if the model or context is blank,
+check that first.
+
 See [`nvim/README.md`](nvim/README.md) for keymaps, the plots-over-SSH recipe,
-and the Bunya-specific gotchas it works around.
+the herdr details, and the Bunya-specific gotchas it works around.
 
 ## References
 

@@ -76,7 +76,7 @@ rows = [
 claude = [
   ["state_icon", { token = "terminal_title_stripped", fg = "#cdd6f4", bold = true }],
   ["state_text", { token = "$model", fg = "#cba6f7" }, { token = "$effort", fg = "#6c7086" }],
-  [{ token = "$context", fg = "#6c7086" }],
+  [{ token = "$context", fg = "#6c7086" }, { token = "$cost", fg = "#a6e3a1" }],
   [{ token = "$cache_mid", fg = "#f9e2af" }, { token = "$cache_low", fg = "#f38ba8" }],
 ]
 
